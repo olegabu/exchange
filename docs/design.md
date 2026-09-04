@@ -128,6 +128,11 @@ Paths are relative to `../sequencer`.
 
 ## 4. Known gaps (recorded, not fixed here)
 
+Gaps in `sequencer` are tracked as issues in that repository, because
+that is where the fix has to happen and nobody working there reads this
+file. This section is the context — why a test here skips — and the
+issue is the work item.
+
 - **sequencer FIX gateway, reconnect.** Catch-up re-runs the output
   codec and sends a reconnecting session *every* output in the window,
   addressee ignored (`fix_output_transport.cpp:339-381`); and
@@ -135,9 +140,9 @@ Paths are relative to `../sequencer`.
   dead id after a reconnect are dropped by `sessionFor() == nullptr`.
   For an exchange with several clients that leaks other clients' fills
   on reconnect. `tests/fix_end_to_end_test.cpp` carries a two-client
-  reconnect drill asserting the correct behaviour, `GTEST_SKIP`ped with
-  a pointer here until the fix lands in `sequencer/gateway/fix` as its
-  own change.
+  reconnect drill asserting the correct behaviour, `GTEST_SKIP`ped until
+  the fix lands. Tracked as
+  **[olegabu/sequencer#1](https://github.com/olegabu/sequencer/issues/1)**.
 - **sequencer FIX gateway, resends carry no `OrigSendingTime`.** FIX
   4.4 requires tag 122 on a `PossDup` retransmission.
   `SentRecord::sendingTime` is declared
@@ -148,8 +153,8 @@ Paths are relative to `../sequencer`.
   and `MsgSeqNum` are correct, so the resend is otherwise faithful; a
   strict client engine may still reject it.
   `tests/fix_end_to_end_test.cpp` asserts the correct behaviour and
-  `GTEST_SKIP`s while the gap stands. A one-line fix in
-  `sequencer/gateway/fix`, as its own change.
+  `GTEST_SKIP`s while the gap stands. Tracked as
+  **[olegabu/sequencer#2](https://github.com/olegabu/sequencer/issues/2)**.
 - **brpc cannot be run under ThreadSanitizer.** Its `bthread` is an M:N
   scheduler that switches stacks under the runtime, which tsan's
   happens-before model cannot follow, so every brpc-linked process

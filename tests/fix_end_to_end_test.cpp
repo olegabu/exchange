@@ -160,6 +160,7 @@ TEST(FixEndToEnd, ReportsArriveFromTheJournalOnTheOwningSessionsAndResendIdentic
 // sendingTime field, and JournalResendSource passes it to the session
 // core (fix_output_transport.cpp:99), but nothing ever assigns it, so
 // every resend goes out flagged PossDup with no OrigSendingTime.
+// olegabu/sequencer#2.
 // Asserts the correct behaviour and skips while the gap stands, so it
 // turns green by itself when the fix lands upstream.
 TEST(FixEndToEnd, ResendsCarryOrigSendingTime) {
@@ -188,15 +189,15 @@ TEST(FixEndToEnd, ResendsCarryOrigSendingTime) {
   if (!resent.front().has(122)) {
     GTEST_SKIP() << "sequencer resent a PossDup message with no OrigSendingTime (122) -- "
                     "SentRecord::sendingTime is declared and read in "
-                    "sequencer/gateway/fix/output/src/fix_output_transport.cpp:99 but never assigned; "
-                    "design.md §4";
+                    "sequencer/gateway/fix/output/src/fix_output_transport.cpp:99 but never assigned. "
+                    "Tracked as olegabu/sequencer#2; design.md §4";
   }
   EXPECT_FALSE(resent.front().get(122).empty());
 }
 
-// design.md §4: sequencer's catch-up re-runs the codec over the journal
-// for a reconnecting session and sends it every captured output
-// regardless of addressee. This drill asserts the correct behaviour --
+// design.md §4 and olegabu/sequencer#1: sequencer's catch-up re-runs the
+// codec over the journal for a reconnecting session and sends it every
+// captured output regardless of addressee. This drill asserts the correct behaviour --
 // BRAVO, away while ALPHA traded, must hear nothing on return -- and
 // records the leak as a skip while the gateway still has it, so the
 // test turns green by itself when the fix lands upstream.
@@ -226,8 +227,8 @@ TEST(FixEndToEnd, AReconnectingSessionHearsOnlyItsOwnReports) {
   if (leaked > 0) {
     GTEST_SKIP() << "sequencer gateway catch-up delivered " << leaked
                  << " report(s) addressed to ALPHA to a reconnecting BRAVO -- the known gap in "
-                    "sequencer/gateway/fix/output/src/fix_output_transport.cpp (CapturingFanout, catchUp); "
-                    "design.md §4";
+                    "sequencer/gateway/fix/output/src/fix_output_transport.cpp (CapturingFanout, catchUp). "
+                    "Tracked as olegabu/sequencer#1; design.md §4";
   }
   EXPECT_EQ(leaked, 0u);
 }
