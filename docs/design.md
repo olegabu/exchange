@@ -150,6 +150,17 @@ Paths are relative to `../sequencer`.
   `tests/fix_end_to_end_test.cpp` asserts the correct behaviour and
   `GTEST_SKIP`s while the gap stands. A one-line fix in
   `sequencer/gateway/fix`, as its own change.
+- **brpc cannot be run under ThreadSanitizer.** Its `bthread` is an M:N
+  scheduler that switches stacks under the runtime, which tsan's
+  happens-before model cannot follow, so every brpc-linked process
+  reports races inside brpc/braft/glog. Verified rather than assumed:
+  sequencer's own `node_integration_test` under its tsan preset reports
+  eight races in the same internals. The three tests here that spawn
+  `exchange_node`/`exchange_fix_gateway` therefore carry the ctest label
+  `spawns-brpc`, and the tsan *test* preset excludes that label — they
+  still build and still run under debug and release. Nothing in this
+  repository is multi-threaded, so tsan's job here is the other 39
+  tests, which run.
 - **`FixRequester` has no payload hook** (`fix_requester.hpp:228-237`);
   the exchange load generator forks it. Upstream generalisation
   (virtual body builder, configurable MsgType) is a sequencer follow-up.
@@ -252,4 +263,11 @@ numbers live in `measurements.md`.
   machine's designated answer. Two more sequencer gateway gaps found by
   measurement and recorded above: catch-up addressing, and the missing
   `OrigSendingTime` on resends.
+- Build step 6 (local half): `bench/exchange_fix_requester.hpp` is a
+  fork of sequencer's `FixRequester` — its internals are private and its
+  body is the counter's `U1`, so there is no hook to send a `35=D`
+  (§4). Correlation is ClOrdID (tag 11), which every ExecutionReport
+  already echoes, so no private tag and no FIFO fallback: a reply that
+  cannot be correlated is one this sender did not cause. What is
+  measured is NewOrderSingle to its first ExecutionReport.
 

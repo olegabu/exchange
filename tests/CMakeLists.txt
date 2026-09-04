@@ -47,4 +47,14 @@ target_compile_definitions(exchange_fix_end_to_end_test PRIVATE
   EXCHANGE_ADMIN_PATH="$<TARGET_FILE:exchange_admin_main>"
 )
 add_dependencies(exchange_fix_end_to_end_test exchange_node_main exchange_fix_gateway_main exchange_admin_main)
-gtest_discover_tests(exchange_fix_end_to_end_test PROPERTIES TIMEOUT 180)
+# Labelled so the tsan preset can skip it, and ONLY it. The test spawns
+# exchange_node and exchange_fix_gateway, which link brpc; brpc's
+# bthread is an M:N scheduler that switches stacks under the runtime,
+# which ThreadSanitizer's happens-before model cannot follow, so it
+# reports races inside brpc/braft on every run. Verified pre-existing
+# rather than assumed: sequencer's own node_integration_test under its
+# tsan preset reports the same eight races in the same brpc internals
+# (docs/design.md §4). Nothing in this repository is multi-threaded --
+# the state machine, the book and both codecs are called from one
+# thread -- so tsan's value here is the other 39 tests, which run.
+gtest_discover_tests(exchange_fix_end_to_end_test PROPERTIES TIMEOUT 180 LABELS "spawns-brpc")
