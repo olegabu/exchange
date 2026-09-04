@@ -37,15 +37,25 @@ TEST(LoadGeneratorShape, TicksFormatExactly) {
 struct Replay {
   Harness h;
   bench::OrderShape shape;
+  // How many independent client sessions share the book, interleaved
+  // the way the fleet's clients are. ONE is the easy case and the one
+  // that hid a real defect: with a single session a taker always finds
+  // the maker that session just placed, so the flow looks balanced
+  // however unbalanced it is under concurrency.
+  int sessions = 1;
   std::size_t matches = 0, accepts = 0, cancels = 0, replaces = 0, rejects = 0, peakResting = 0;
 
-  explicit Replay(bench::OrderShape s) : shape(std::move(s)) { h.addAbc(shape.symbol); }
+  explicit Replay(bench::OrderShape s, int sessionCount = 1)
+      : shape(std::move(s)), sessions(sessionCount) {
+    h.addAbc(shape.symbol);
+  }
 
   // A complete FIX 4.4 message around a body, as the gateway hands the
   // codec the raw bytes it received off the socket.
-  static std::string frame(const char* msgType, const std::string& body) {
-    const std::string inner = std::string("35=") + msgType +
-                              "\00149=LOADGEN\00156=EXCHANGE\00134=7\00152=20260904-12:00:00\001" + body;
+  static std::string frame(const char* msgType, const std::string& body,
+                            const std::string& sender = "LOADGEN") {
+    const std::string inner = std::string("35=") + msgType + "\00149=" + sender +
+                              "\00156=EXCHANGE\00134=7\00152=20260904-12:00:00\001" + body;
     std::string msg = "8=FIX.4.4\0019=" + std::to_string(inner.size()) + "\001" + inner;
     unsigned sum = 0;
     for (unsigned char c : msg) {
@@ -62,13 +72,32 @@ struct Replay {
   // different claims, and only this checks the second.
   void run(int messages) {
     fix::ExchangeFixInputCodec codec;
+    // Round-robin across sessions, one whole message at a time: every
+    // session runs its own cycle, and they interleave in the book
+    // exactly as separate clients do. Each carries its own CompID, so
+    // ClOrdIDs stay scoped per sender as they are on the wire.
+    // Sessions start at DIFFERENT points in the cycle. Round-robin from
+    // a common start puts them in lockstep -- every session placing a
+    // maker at the same instant, then every session taking -- so each
+    // taker still finds a fresh maker and the flow looks balanced. Real
+    // sessions drift; this staggers them by three steps each, which is
+    // co-prime with the seven-step cycle and so spreads them across it.
+    // Without this the test passed even with resting takers, which is
+    // to say it tested nothing (docs/spec.md §10.2).
+    std::vector<std::int64_t> next(static_cast<std::size_t>(sessions), 0);
+    for (std::size_t k = 0; k < next.size(); ++k) {
+      next[k] = static_cast<std::int64_t>(k) * 3;
+    }
     for (int i = 0; i < messages; ++i) {
-      const bench::PlannedStep p = bench::plan(shape, i);
-      const std::string raw =
-          frame(bench::msgTypeOf(p.action), bench::buildBody(shape, p, i, i - 1));
+      const std::size_t who = static_cast<std::size_t>(i % sessions);
+      const std::int64_t seq = next[who]++;
+      const bench::PlannedStep p = bench::plan(shape, seq);
+      const std::string raw = frame(bench::msgTypeOf(p.action),
+                                    bench::buildBody(shape, p, seq, seq - 1),
+                                    "LOADGEN" + std::to_string(who));
       sequencer::ClientRequest request;
       request.body = sequencer::Payload(reinterpret_cast<const std::byte*>(raw.data()), raw.size());
-      request.sessionId = 1;
+      request.sessionId = static_cast<std::uint64_t>(who) + 1;
       auto encoded = codec.toInput(request);
       ASSERT_TRUE(encoded.ok()) << "message " << i << " was not encodable: " << encoded.error();
       Encoded input;
@@ -115,6 +144,48 @@ TEST(LoadGeneratorShape, MatchesAndLeavesABoundedBook) {
   // by the message count.
   EXPECT_LT(r.peakResting, 50u) << "resting orders grew with the run: peak " << r.peakResting;
   EXPECT_LT(r.h.sm.liveOrderCount(), 50u);
+}
+
+// The invariant that actually matters, and the one a single session
+// cannot check: several clients share one book, so a taker frequently
+// finds the level already cleared by somebody else's taker. If takers
+// could rest, each such taker would leave an order behind that only
+// leaves if a later taker happens to hit it -- 3.8% of orders per cycle
+// on the five-client fleet run that found this, growing linearly with
+// run length until the book, the apply cost and the latency climbed
+// together and the achieved rate FELL as the offered rate rose.
+//
+// IOC takers make the cycle balanced whoever matches whom. This asserts
+// that directly: five interleaved sessions, and depth must not grow
+// with the run.
+TEST(LoadGeneratorShape, SeveralSessionsSharingTheBookDoNotAccumulate) {
+  struct Result {
+    std::size_t rejects, live, matches;
+  };
+  auto measure = [](int messages) {
+    Replay r{bench::OrderShape{}, 5};
+    r.run(messages);
+    EXPECT_GT(r.matches, 0u) << "the interleaved flow must still match";
+    return Result{r.rejects, r.h.sm.liveOrderCount(), r.matches};
+  };
+  const Result shortRun = measure(7 * 5 * 200);
+  const Result longRun = measure(7 * 5 * 800);
+
+  // The signal is REJECTS, not depth. In this deterministic replay a
+  // plain limit taker still finds a maker, so the book stays small
+  // either way -- but every cycle whose maker was taken by another
+  // session leaves a cancel or replace with nothing to act on, and
+  // those grow one-for-one with the run. Four times the messages must
+  // not mean four times the rejects.
+  //
+  // Without IOC takers this reads 1,001 -> 4,001, exactly linear. With
+  // them it is 2 -> 2. On the five-client fleet the same defect showed
+  // as 97,293 cancel/replace rejects and 53,127 orders left resting and
+  // still climbing.
+  EXPECT_LT(longRun.rejects, shortRun.rejects * 2 + 10)
+      << "rejects grew with run length: " << shortRun.rejects << " -> " << longRun.rejects
+      << " -- the flow is not self-balancing across sessions";
+  EXPECT_LT(longRun.live, 50u) << "resting orders after the long run: " << longRun.live;
 }
 
 // Doubling the run must not move the peak: that is what "bounded"

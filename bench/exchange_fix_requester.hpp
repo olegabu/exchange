@@ -81,12 +81,12 @@ inline constexpr int kClOrdIdTag = 11;
 // The cycle is seven messages and nets to zero:
 //
 //   0  35=D  maker rests inside the band
-//   1  35=D  taker prices through the band  -> matches step 0
+//   1  35=D  taker, IMMEDIATE-OR-CANCEL, prices through the band
 //   2  35=D  maker rests
 //   3  35=F  cancels step 2                 -> nothing rests
 //   4  35=D  maker rests
 //   5  35=G  replaces step 4 to a new price -> still rests
-//   6  35=D  taker prices through the band  -> matches step 5
+//   6  35=D  taker, IMMEDIATE-OR-CANCEL, prices through the band
 //
 // Five NewOrderSingles, one cancel, one replace; two matches. Makers
 // swap sides every cycle, so both sides of the book are worked.
@@ -213,8 +213,10 @@ inline std::string buildBody(const OrderShape& shape, const PlannedStep& planned
              std::to_string(shape.quantityLots) + "\00140=2\00144=" + formatTicks(planned.priceTicks) +
              "\001";
     default:
+      // 59=3 immediate-or-cancel for a taker, 59=0 day for a maker.
       return "11=" + std::to_string(nonce) + common + "38=" + std::to_string(shape.quantityLots) +
-             "\00140=2\00144=" + formatTicks(planned.priceTicks) + "\00159=0\001";
+             "\00140=2\00144=" + formatTicks(planned.priceTicks) +
+             (planned.maker ? "\00159=0\001" : "\00159=3\001");
   }
 }
 

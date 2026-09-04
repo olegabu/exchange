@@ -305,4 +305,22 @@ numbers live in `measurements.md`.
   answer "is the book growing?", and reading it as book growth was
   wrong: the node mmaps its own journal. An instrument that answers the
   question directly beat another round of inference (§10.1).
+- The exchange's FIX knee is ~25k against sequencer's 400k on the same
+  fleet, and the investigation is in `measurements.md` §3. Exonerated by
+  measurement: the platform (a counter control reached 399,899/s the
+  same day), the input path and payload size (343k with every order
+  rejected), the state machine (`apply` costs 1 µs at p50), snapshots,
+  gateway CPU, and accumulated state. Nothing is CPU-saturated at the
+  knee, which makes it a blocking path rather than a compute-bound one.
+  Two of my own intermediate readings were wrong and are corrected
+  there — node RSS was the journal mmap, and "the apply thread is idle"
+  came from an already-collapsed run.
+- Load generator: takers are immediate-or-cancel. A plain limit taker
+  that finds its level already cleared by another session rests, and
+  the cycle then leaks one order per occurrence — 3.8% per cycle on a
+  five-client run, 53,127 orders resting and climbing. The invariant
+  held for one session, which is why the single-session test missed it;
+  the test now replays five phase-staggered sessions and was proven to
+  fail on the defect before the fix was trusted. Fixing it did not move
+  the knee: it was a defect in the measurement, not the ceiling.
 

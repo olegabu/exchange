@@ -100,14 +100,16 @@ offered rate split across the five clients.
 
 | offered | achieved | p50 | p99 | dropped by rig |
 |---|---|---|---|---|
-| 10,000 | 9,995 | **875 µs** | 1,125 µs | 0 |
-| 25,000 | 24,995 | **1,212 µs** | 3,236 µs | 0 |
-| 50,000 | 21,011 | 157 ms | 209 ms | 814,127 |
-| 75,000 | 14,768 | 264 ms | 310 ms | 2,180,716 |
-| 100,000 | 11,593 | 506 ms | 578 ms | 3,359,806 |
-| 150,000 | 9,357 | 1.12 s | 1.21 s | 5,494,611 |
-| 200,000 | 9,159 | 1.61 s | 1.81 s | 7,508,722 |
-| 250,000–500,000 | 7.8k → 6.8k | 2.5 s → 6.8 s | — | up to 19.7M |
+Final ladder, after the load-generator fix below:
+
+| offered | achieved | p50 | p99 | dropped by rig |
+|---|---|---|---|---|
+| 10,000 | 9,995 | **786 µs** | 1,005 µs | 0 |
+| 25,000 | 24,991 | **899 µs** | 2,332 µs | 0 |
+| 50,000 | 25,043 | 164 ms | 222 ms | 659,726 |
+| 75,000 | 15,234 | 276 ms | 340 ms | 2,155,903 |
+| 100,000 | 12,022 | 512 ms | 591 ms | 3,339,154 |
+| 150,000–500,000 | 10.1k → 6.1k | 1.0 s → 7.7 s | — | rising |
 
 Chart: `raft-tests/knee-exchange-fix.svg`.
 
@@ -117,59 +119,80 @@ journal and delivery path, carrying a counter — runs clean to **400k**.
 So the exchange reaches roughly **1/16th** of it, and the achieved rate
 *declines* past the knee rather than plateauing.
 
-### What the collapse is not
+### The investigation: what the ceiling is not
 
-Each ruled out by measurement, not by argument (§10.1):
+Each ruled out by measurement, not by argument (§10.1). The sweep was
+re-run after each change; the knee did not move.
 
-- **Not snapshots.** The node log contains exactly one snapshot line,
-  `Deleting .../snapshot/temp`, written at startup. braft's default
-  interval is an hour and the run was ~15 minutes, so none ever fired.
-- **Not an unbounded book.** `exchange_journal_stats` replayed the
-  620,002-record journal of a 10k run: **177,143 matches** — exactly
-  the two-per-seven-message cycle the flow is designed to produce — and
-  **3,830 live orders** at the end. The book is bounded and the flow
-  matches.
-- **Not the memory growth it looked like.** Node RSS climbing 32 → 272
-  MB during a run was read as the book growing; it is the node mmapping
-  *its own journal*, which grows at 288 B/record (97 B input + 191 B of
-  outputs). At 10k/s for 56 s that is ~190 MB, which is the number
-  observed. The tool exists because RSS could not answer this and an
-  inference from it was wrong.
-- **Not the gateway.** Under load at 40k, no gateway thread exceeded
-  22.5% of a core.
-- **Not, mainly, the state machine.** With `SEQ_APPLY_STALL_US=2000`
-  armed and verified in `/proc/<pid>/environ` (§10.3), only **20 inputs
-  out of ~7 million** exceeded 2 ms in `apply()`, at 2.2–2.8 ms each —
-  nowhere near enough to explain a sustained 79 ms p50.
+- **Not the platform.** sequencer's own counter, run on this same
+  fleet on the same day through the same gateway shape, reached
+  **399,899/s at 4.5 ms p50 with zero drops**. braft, the journal, the
+  gateway chassis and the hardware are all fine at 400k. This control
+  is what makes the rest of the comparison meaningful.
+- **Not the input path, the payload size, the FIX input codec, or
+  propose.** Running the identical flow against an unknown symbol, so
+  every order is *rejected* — same 97-byte input, same codec, same
+  propose path, one small output, no matching — reached **99,955/s
+  with zero drops** and 343,696/s at 400k offered.
+- **Not the state machine.** With `SEQ_APPLY_STALL_US=25` armed and
+  verified in `/proc/<pid>/environ` (§10.3), `apply()` costs **1 µs at
+  p50 and 46 µs at maximum**. That is a ceiling near a million per
+  second, forty times above the observed knee.
+- **Not snapshots.** None ever fired: braft's default interval is an
+  hour and the runs were minutes.
+- **Not gateway CPU.** Under a five-client 50k run its busiest thread
+  was **13.7%** of one core, and a `perf` profile showed nothing above
+  2.6%, with `__sched_yield` on top — a thread spinning on empty.
+- **Not accumulated journal or book state.** 50k collapses identically
+  on a freshly wiped cluster (24,258 achieved) as on one that had
+  already run the lower rates (21,011).
 
-### What it is
+Two of my own earlier readings were wrong and are corrected here: node
+RSS growth was the node mmapping its own journal, not the book growing;
+and "the apply thread is idle so the ceiling is upstream" came from an
+already-collapsed run, where idleness is as much effect as cause. The
+`sm=1 µs` figure above is the direct measurement that replaces it.
 
-The same instrument shows the apply thread **starved, not saturated**:
+### What was found and fixed
 
-```
-[apply-stall] seq=6997012 gap=79982us sm=13us journal=0us notify=0us
-```
+The five-client run left **53,127 orders resting and climbing**, with
+97,293 cancel/replace rejects, and the arithmetic closed exactly:
+1,403,953 accepted − 1,123,246 retired by fills − 227,595 cancelled =
+53,112. The load generator's cycle balances only if each taker consumes
+the maker its *own* session placed; with five sessions interleaved a
+taker often finds the level already cleared, so it rested instead,
+leaking 3.8% of orders per cycle — linear in run length. **The sweep
+was partly measuring a book growing without bound.**
 
-An 80 ms gap waiting for the next committed entry, with the state
-machine taking 13 µs. The ceiling is **upstream of the matching
-engine** — in the propose and replication path — which is the same
-signature `raft-tests/sequencer/README.md` records for sequencer's own
-residual tail.
+Fixed by making takers immediate-or-cancel, which is also what an
+aggressive order usually is. `load_generator_shape_test` now replays
+five phase-staggered sessions and asserts rejects do not grow with run
+length; it reads 1,001 → 4,001 with the defect and 2 → 2 without, and
+that failure was demonstrated before the fix was trusted (§10.2). An
+earlier version of the same test passed *with the bug reintroduced*,
+because round-robin put every session in lockstep — a vacuous probe,
+caught only by trying to make it fail.
 
-### Hypotheses for the next round, in order
+**This did not move the knee**, so it was a real defect in the
+measurement, not the cause of the ceiling.
 
-Stated as hypotheses because none is measured yet:
+### Where it stands
 
-1. **Record size.** 288 B/record against the counter's ~16 B — 18×
-   more journal traffic and 18× more per braft entry, at every rate.
-2. **Output fan-out.** 1.57 FIX messages per input (accept, plus one
-   execution report per party per match) against the counter's 1.
-3. **Output codec allocation.** Every execution report is built by
-   appending to a `std::string` with a `std::to_string` per field.
+The ceiling is ~25k for the matching flow against 343k for the same
+flow without matching, on hardware that does 400k with the counter,
+with no component CPU-saturated and the apply thread costing 1 µs.
+That combination — a hard throughput limit with nothing busy — is a
+*blocking* path, not a compute-bound one.
 
-The instrument for (1) and (2) is a run with a deliberately trivial
-state machine behind the same codecs; for (3), the allocation counter
-already in `bench/apply_benchmark.cpp`, pointed at the codec.
+Next, in order:
+
+1. A flow variant of maker-then-cancel only: bounded book, one output
+   per input, **no fills**. It separates "fills are expensive" from
+   "having a book at all is expensive", which is the last big fork.
+2. A release build **without `-s`** so `perf` can resolve symbols; the
+   node profile was 95% inside 400 bytes of stripped code.
+3. If those do not settle it, `SEQ_SEGMENT_OPEN_US` / `SEQ_TAIL_STALL_US`
+   on the output side, which is the half no probe has covered yet.
 
 ## 4. Fleet p50 at 100k — superseded
 
