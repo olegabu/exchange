@@ -293,4 +293,16 @@ numbers live in `measurements.md`.
   bytes through the real input codec rather than approximating them:
   "the flow is admissible" and "the flow encodes to FIX the codec
   accepts" are different claims.
+- First fleet sweep (2026-09-04): clean through 25k, knee between 25k
+  and 50k, against sequencer-fix's 400k on the same path. Ruled out by
+  measurement: snapshots (none fired), an unbounded book (177,143
+  matches, 3,830 live orders), the gateway (no thread over 22.5%), and
+  the state machine (20 inputs over 2 ms in ~7 million). The apply
+  thread is idle at the knee — `gap=79982us sm=13us` — so the ceiling
+  is upstream, in the propose path. Numbers and next steps in
+  `measurements.md` §3.
+- `tools/journal_stats_main.cpp` exists because node RSS could not
+  answer "is the book growing?", and reading it as book growth was
+  wrong: the node mmaps its own journal. An instrument that answers the
+  question directly beat another round of inference (§10.1).
 

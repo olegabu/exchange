@@ -60,3 +60,11 @@ set_target_properties(exchange_admin_main PROPERTIES OUTPUT_NAME exchange_admin)
 target_link_libraries(exchange_admin_main PRIVATE
   exchange::sbe sequencer::node gflags::gflags_static glog::glog sequencer::common)
 target_include_directories(exchange_admin_main PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+
+# docs/spec.md §10.1: an instrument for "what is actually in this
+# journal?", which node RSS cannot answer -- the node mmaps its own
+# journal, so RSS grows with the log whether or not the book does.
+add_executable(exchange_journal_stats_main ../tools/journal_stats_main.cpp)
+set_target_properties(exchange_journal_stats_main PROPERTIES OUTPUT_NAME exchange_journal_stats)
+target_link_libraries(exchange_journal_stats_main PRIVATE
+  exchange::state_machine gflags::gflags_static)

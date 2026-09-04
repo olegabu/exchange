@@ -88,7 +88,93 @@ an exchange, at $79/day. `tests/load_generator_shape_test.cpp` now
 asserts that the flow matches and that peak depth does not move when
 the run doubles.
 
-## 3. Fleet p50 at 100k — pending
+## 3. Fleet — the first sweep (2026-09-04)
+
+Fleet: 3 × `c7a.4xlarge` nodes, multi-AZ (us-east-1a/b/c); 5 ×
+`c7a.2xlarge` clients. **One** FIX gateway, on NODE1 — the same shape
+`sequencer-fix` was measured in, so the two are comparable and the
+intended difference between them is a matching engine on the apply
+thread instead of an eight-byte counter. Release preset, binaries
+checksum-verified on every host (§10.4), 10 s warm-up, 30 s measured,
+offered rate split across the five clients.
+
+| offered | achieved | p50 | p99 | dropped by rig |
+|---|---|---|---|---|
+| 10,000 | 9,995 | **875 µs** | 1,125 µs | 0 |
+| 25,000 | 24,995 | **1,212 µs** | 3,236 µs | 0 |
+| 50,000 | 21,011 | 157 ms | 209 ms | 814,127 |
+| 75,000 | 14,768 | 264 ms | 310 ms | 2,180,716 |
+| 100,000 | 11,593 | 506 ms | 578 ms | 3,359,806 |
+| 150,000 | 9,357 | 1.12 s | 1.21 s | 5,494,611 |
+| 200,000 | 9,159 | 1.61 s | 1.81 s | 7,508,722 |
+| 250,000–500,000 | 7.8k → 6.8k | 2.5 s → 6.8 s | — | up to 19.7M |
+
+Chart: `raft-tests/knee-exchange-fix.svg`.
+
+**The result.** Clean through **25k** at 1.2 ms p50 with zero drops.
+The knee is between 25k and 50k. `sequencer-fix` — the same gateway,
+journal and delivery path, carrying a counter — runs clean to **400k**.
+So the exchange reaches roughly **1/16th** of it, and the achieved rate
+*declines* past the knee rather than plateauing.
+
+### What the collapse is not
+
+Each ruled out by measurement, not by argument (§10.1):
+
+- **Not snapshots.** The node log contains exactly one snapshot line,
+  `Deleting .../snapshot/temp`, written at startup. braft's default
+  interval is an hour and the run was ~15 minutes, so none ever fired.
+- **Not an unbounded book.** `exchange_journal_stats` replayed the
+  620,002-record journal of a 10k run: **177,143 matches** — exactly
+  the two-per-seven-message cycle the flow is designed to produce — and
+  **3,830 live orders** at the end. The book is bounded and the flow
+  matches.
+- **Not the memory growth it looked like.** Node RSS climbing 32 → 272
+  MB during a run was read as the book growing; it is the node mmapping
+  *its own journal*, which grows at 288 B/record (97 B input + 191 B of
+  outputs). At 10k/s for 56 s that is ~190 MB, which is the number
+  observed. The tool exists because RSS could not answer this and an
+  inference from it was wrong.
+- **Not the gateway.** Under load at 40k, no gateway thread exceeded
+  22.5% of a core.
+- **Not, mainly, the state machine.** With `SEQ_APPLY_STALL_US=2000`
+  armed and verified in `/proc/<pid>/environ` (§10.3), only **20 inputs
+  out of ~7 million** exceeded 2 ms in `apply()`, at 2.2–2.8 ms each —
+  nowhere near enough to explain a sustained 79 ms p50.
+
+### What it is
+
+The same instrument shows the apply thread **starved, not saturated**:
+
+```
+[apply-stall] seq=6997012 gap=79982us sm=13us journal=0us notify=0us
+```
+
+An 80 ms gap waiting for the next committed entry, with the state
+machine taking 13 µs. The ceiling is **upstream of the matching
+engine** — in the propose and replication path — which is the same
+signature `raft-tests/sequencer/README.md` records for sequencer's own
+residual tail.
+
+### Hypotheses for the next round, in order
+
+Stated as hypotheses because none is measured yet:
+
+1. **Record size.** 288 B/record against the counter's ~16 B — 18×
+   more journal traffic and 18× more per braft entry, at every rate.
+2. **Output fan-out.** 1.57 FIX messages per input (accept, plus one
+   execution report per party per match) against the counter's 1.
+3. **Output codec allocation.** Every execution report is built by
+   appending to a `std::string` with a `std::to_string` per field.
+
+The instrument for (1) and (2) is a run with a deliberately trivial
+state machine behind the same codecs; for (3), the allocation counter
+already in `bench/apply_benchmark.cpp`, pointed at the codec.
+
+## 4. Fleet p50 at 100k — superseded
+
+Folded into §3: 100k is well past the knee, so the §9.1 latency target
+is not meaningful there yet. The comparable figure is 25k at 1.2 ms.
 
 Gated: the EC2 fleet costs ~$79/day and is started only for a
 measurement that is ready to be made, then stopped
@@ -99,4 +185,4 @@ from here. Needs, per the plan: `APP_BIN_DIR` in
 after the gateways start, binaries checksummed on every host (§10.4),
 and `/proc/<pid>/environ` checked for any env flag (§10.3).
 
-## 4. Fleet sweep — pending (step 6)
+
