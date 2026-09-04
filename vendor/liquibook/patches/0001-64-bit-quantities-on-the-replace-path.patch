@@ -1,0 +1,26 @@
+--- src/book/order_book.h	2026-09-04 14:56:16.061032244 +0400
++++ src/book/order_book.h	2026-09-04 15:24:56.153753830 +0400
+@@ -522,10 +522,10 @@
+     // If this is a valid replace
+     const Tracker& tracker = pos->second;
+     // If there is not enough open quantity for the size reduction
+-    if (size_delta < 0 && ((int)tracker.open_qty() < -size_delta)) 
++    if (size_delta < 0 && (static_cast<int64_t>(tracker.open_qty()) < -size_delta)) 
+     {
+       // get rid of as much as we can
+-      size_delta = -int(tracker.open_qty());
++      size_delta = -static_cast<int64_t>(tracker.open_qty());
+       if(size_delta == 0)
+       {
+         // if there is nothing to get rid of
+--- src/book/order_tracker.h	2026-09-04 14:56:16.061032244 +0400
++++ src/book/order_tracker.h	2026-09-04 15:24:56.177754795 +0400
+@@ -86,7 +86,7 @@
+ OrderTracker<OrderPtr>::change_qty(int64_t delta)
+ {
+   if ((delta < 0 && 
+-      (int)open_qty_ < std::abs(delta))) {
++      static_cast<int64_t>(open_qty_) < std::abs(delta))) {
+     throw 
+         std::runtime_error("Replace size reduction larger than open quantity");
+   }

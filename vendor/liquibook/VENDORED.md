@@ -24,3 +24,12 @@ hit is a determinism review, not a whitespace change.
 
 Compiled as a `SYSTEM` include (`exchange::liquibook`), so this
 repository's `-Werror` does not apply to upstream code.
+
+## Patches carried
+
+Applied on top of the upstream commit, in order; each is a diff against
+the pristine upstream file so a bump can re-apply it with `patch -p0`.
+
+| Patch | Why |
+|---|---|
+| `patches/0001-64-bit-quantities-on-the-replace-path.patch` | `OrderBook::replace` and `OrderTracker::change_qty` compared open quantities through `(int)`, so any open quantity above 2^31 (22 lots at this repo's 10^-8 units) clamped a size decrease to garbage or threw. Found by `matching_test` (a 100-lot order replaced to 50 came back as 2^33) and the differential test. Three casts widened to `int64_t`; no other behaviour change. |

@@ -86,6 +86,8 @@
       <validValue name="UnsupportedTimeInForce">12</validValue>
       <validValue name="SideMismatch">13</validValue>
       <validValue name="NotAuthorized">14</validValue>
+      <validValue name="ReplaceQuantityBelowFilled">15</validValue>
+      <validValue name="SymbolMismatch">16</validValue>
     </enum>
     <enum name="CancelReason" encodingType="uint8">
       <validValue name="Requested">1</validValue>

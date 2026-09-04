@@ -522,10 +522,10 @@ OrderBook<OrderPtr>::replace(
     // If this is a valid replace
     const Tracker& tracker = pos->second;
     // If there is not enough open quantity for the size reduction
-    if (size_delta < 0 && ((int)tracker.open_qty() < -size_delta)) 
+    if (size_delta < 0 && (static_cast<int64_t>(tracker.open_qty()) < -size_delta)) 
     {
       // get rid of as much as we can
-      size_delta = -int(tracker.open_qty());
+      size_delta = -static_cast<int64_t>(tracker.open_qty());
       if(size_delta == 0)
       {
         // if there is nothing to get rid of

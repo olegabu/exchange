@@ -211,3 +211,12 @@ numbers live in `measurements.md`.
 - No trade id field; `account` is FIX tag 1 as a string; prices are
   `int64` at 10⁻⁸; one `Fill` group per input bounded by admission, not
   chunked. (§3)
+- Build step 3 findings: liquibook's replace path compared open
+  quantities through `(int)`; patched (`vendor/liquibook/patches/0001`).
+  Every replace re-queues (liquibook erases and re-inserts, even for a
+  quantity decrease) — accepted for v1 as deterministic, asserted by
+  `matching_test`, revisit if a venue rule requires priority retention.
+  An undecodable or unknown input is a deterministic no-op with no
+  output (there is no session to tell); an input from a newer schema
+  version stops the node (`docs/liquibook-determinism.md`).
+

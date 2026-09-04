@@ -13,3 +13,14 @@ add_executable(exchange_schema_test schema_test.cpp)
 target_link_libraries(exchange_schema_test PRIVATE
   exchange::state_machine GTest::gtest GTest::gtest_main)
 gtest_discover_tests(exchange_schema_test)
+
+# Step 3: matching semantics and the two determinism gates (spec §5).
+add_executable(exchange_matching_test matching_test.cpp)
+target_link_libraries(exchange_matching_test PRIVATE
+  exchange::state_machine GTest::gtest GTest::gtest_main)
+gtest_discover_tests(exchange_matching_test)
+
+add_executable(exchange_determinism_test determinism_test.cpp)
+target_link_libraries(exchange_determinism_test PRIVATE
+  exchange::state_machine sequencer::replay GTest::gtest GTest::gtest_main sequencer::common)
+gtest_discover_tests(exchange_determinism_test PROPERTIES TIMEOUT 300)

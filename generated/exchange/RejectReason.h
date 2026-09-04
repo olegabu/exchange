@@ -44,6 +44,8 @@ public:
         UnsupportedTimeInForce = static_cast<std::uint8_t>(12),
         SideMismatch = static_cast<std::uint8_t>(13),
         NotAuthorized = static_cast<std::uint8_t>(14),
+        ReplaceQuantityBelowFilled = static_cast<std::uint8_t>(15),
+        SymbolMismatch = static_cast<std::uint8_t>(16),
         NULL_VALUE = static_cast<std::uint8_t>(255)
     };
 
@@ -65,6 +67,8 @@ public:
             case static_cast<std::uint8_t>(12): return UnsupportedTimeInForce;
             case static_cast<std::uint8_t>(13): return SideMismatch;
             case static_cast<std::uint8_t>(14): return NotAuthorized;
+            case static_cast<std::uint8_t>(15): return ReplaceQuantityBelowFilled;
+            case static_cast<std::uint8_t>(16): return SymbolMismatch;
             case static_cast<std::uint8_t>(255): return NULL_VALUE;
         }
 
@@ -89,6 +93,8 @@ public:
             case UnsupportedTimeInForce: return "UnsupportedTimeInForce";
             case SideMismatch: return "SideMismatch";
             case NotAuthorized: return "NotAuthorized";
+            case ReplaceQuantityBelowFilled: return "ReplaceQuantityBelowFilled";
+            case SymbolMismatch: return "SymbolMismatch";
             case NULL_VALUE: return "NULL_VALUE";
         }
 
