@@ -61,17 +61,82 @@ using sequencer::bench::LoadGeneratorRequester;
 // FIX tags this sender reads and writes.
 inline constexpr int kClOrdIdTag = 11;
 
-// The shape of the order flow. Prices step around a mid so that a
-// steady stream both rests and crosses: with kPriceLevels levels and
-// alternating sides, roughly half of each side's orders find a resting
-// counterparty, which is what makes the measurement exercise matching
-// rather than a book that only ever grows.
+// The shape of the order flow, and the reason it is shaped this way.
+//
+// MAKERS AND TAKERS ALTERNATE, one for one, so the resting book stays
+// bounded however long the run is. Each maker rests a lot inside the
+// band; the taker that follows it prices through the whole band on the
+// opposite side, so it crosses exactly one lot and the pair nets out.
+// The roles swap sides every other pair, so both sides of the book are
+// exercised.
+//
+// Two shapes were tried before this one, and both were wrong in a way
+// only a run showed:
+//
+//   1. Buys stepping DOWN from the mid, sells stepping UP. The sides
+//      never overlap, so only orders exactly at the mid matched and
+//      every other order rested forever -- a 30s run at 100k would end
+//      with ~3M resting orders and would have measured a book growing,
+//      not an exchange matching.
+//   2. Both sides walking the SAME band. Far better -- a quarter of
+//      the flow matched -- but buys still accumulated at the bottom of
+//      the band and sells at the top, ~9% of orders, which is linear
+//      in run length. A seventeen-rate sweep shares one cluster, so
+//      that is tens of millions of resting orders by the end of the
+//      ladder.
+//
+// Both were caught by a loopback run and by the assertions in
+// tests/load_generator_shape_test.cpp, before any fleet time
+// (docs/spec.md §10.1: instrument, do not theorise).
 struct OrderShape {
   std::string symbol = "ABC";
   std::int64_t midTicks = 10000;   // 100.00 at a 0.01 tick
-  std::int64_t priceLevels = 5;    // ticks either side of the mid
+  std::int64_t priceLevels = 5;    // how wide the band makers rest in
   std::int64_t quantityLots = 1;
 };
+
+// The side and price of the sequence-th order. A free function so the
+// flow can be replayed through a state machine in a test without a
+// socket.
+struct PlannedOrder {
+  bool buy;
+  std::int64_t priceTicks;
+  bool maker;  // for tests and diagnostics; the wire carries no such field
+};
+
+inline PlannedOrder plan(const OrderShape& shape, std::int64_t sequence) {
+  const std::int64_t levels = shape.priceLevels < 1 ? 1 : shape.priceLevels;
+  const bool taker = (sequence & 1) != 0;
+  // Roles swap sides every other pair: pairs 0,1 work the bid, 2,3 the
+  // ask, and so on.
+  const bool makerBuys = ((sequence / 2) & 1) == 0;
+  const std::int64_t step = (sequence / 4) % levels;
+  if (!taker) {
+    // Rests inside the band, one tick or more away from the mid.
+    return {makerBuys, makerBuys ? shape.midTicks - 1 - step : shape.midTicks + 1 + step, true};
+  }
+  // Prices through the whole band on the other side, so it crosses the
+  // best resting order and, at one lot, exactly one of them.
+  return {!makerBuys, makerBuys ? shape.midTicks - levels - 1 : shape.midTicks + levels + 1, false};
+}
+
+// Ticks (hundredths) as an exact decimal string. No floating point.
+inline std::string formatTicks(std::int64_t ticks) {
+  std::string out = std::to_string(ticks / 100);
+  const std::int64_t cents = ticks % 100;
+  if (cents != 0) {
+    out += '.';
+    if (cents < 10) {
+      out += '0';
+    }
+    std::string digits = std::to_string(cents);
+    while (digits.size() > 1 && digits.back() == '0') {
+      digits.pop_back();
+    }
+    out += digits;
+  }
+  return out;
+}
 
 class ExchangeFixRequester : public LoadGeneratorRequester {
  public:
@@ -227,29 +292,12 @@ class ExchangeFixRequester : public LoadGeneratorRequester {
     }
   }
 
-  // One NewOrderSingle. Sides alternate and the price walks the levels
-  // around the mid, so the flow both rests and crosses.
+  // One NewOrderSingle, per the shape above.
   std::string buildOrder(std::int64_t nonce, std::int64_t sequence) const {
-    const bool buy = (sequence & 1) == 0;
-    const std::int64_t step = sequence % shape_.priceLevels;
-    const std::int64_t ticks = buy ? shape_.midTicks - step : shape_.midTicks + step;
-    // Ticks of 0.01 -> a decimal string, without floating point.
-    std::string price = std::to_string(ticks / 100);
-    const std::int64_t cents = ticks % 100;
-    if (cents != 0) {
-      price += '.';
-      if (cents < 10) {
-        price += '0';
-      }
-      std::string digits = std::to_string(cents);
-      while (digits.size() > 1 && digits.back() == '0') {
-        digits.pop_back();
-      }
-      price += digits;
-    }
-    return "11=" + std::to_string(nonce) + "\00155=" + shape_.symbol + "\00154=" + (buy ? "1" : "2") +
-           "\00160=20260904-00:00:00\00138=" + std::to_string(shape_.quantityLots) + "\00140=2\00144=" + price +
-           "\00159=0\001";
+    const PlannedOrder p = plan(shape_, sequence);
+    return "11=" + std::to_string(nonce) + "\00155=" + shape_.symbol + "\00154=" + (p.buy ? "1" : "2") +
+           "\00160=20260904-00:00:00\00138=" + std::to_string(shape_.quantityLots) +
+           "\00140=2\00144=" + formatTicks(p.priceTicks) + "\00159=0\001";
   }
 
  private:

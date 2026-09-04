@@ -52,8 +52,51 @@ once per braft snapshot interval. Load happens on a restarting
 replica, off the critical path. Both scale linearly with resting
 orders, not with history.
 
-## 2. Loopback — pending (step 6)
+## 2. Loopback (build step 6) — a rig check, not a measurement
 
-## 3. Fleet p50 at 100k — pending (step 6)
+One 4-core, 3.1 GHz development box running all three roles:
+`exchange_node` (whose apply thread pure-spins a whole core by
+design), `exchange_fix_gateway`, and `exchange_load_generator` over the
+loopback interface. Release preset, 3 s warm-up, 10 s measured.
+
+| offered | p50 | p99 | drops | unanswered | rig schedule lag p99 |
+|---|---|---|---|---|---|
+| 1,000/s | 4.8 ms | 25.5 ms | 0 | 0 | 17.5 ms |
+| 10,000/s | 13.7 ms | 83.8 ms | 0 | 0 | 17.4 ms |
+
+**What this establishes.** The whole path works under continuous load:
+nothing dropped, nothing went unanswered, the gateway logged no errors,
+and the flow matched (`load_generator_shape_test` pins that). That is
+what a loopback run is for.
+
+**What it does not establish, and cannot.** Any latency number. The
+harness's own rig criterion rejects it: schedule lag sits near 17 ms at
+p99 at *every* rate including 1,000/s, which means the load generator's
+own thread is being descheduled, and at 10,000/s the harness prints
+"the offered rate was not actually achieved. This run cannot be
+reported as such" and declines the row. Four cores cannot host a
+pure-spinning apply thread, brpc's worker pool, a gateway and a sender
+at once. This is exactly the case the fleet exists for, and exactly the
+reason to run the loopback first: it costs nothing and it says plainly
+that the next number has to come from real hardware.
+
+**One thing the loopback caught that no reading would have.** The first
+two order-flow shapes tried in `exchange_fix_requester.hpp` produced,
+respectively, almost no matching and a book that grew with run length.
+Both would have made a fleet sweep measure a growing book rather than
+an exchange, at $79/day. `tests/load_generator_shape_test.cpp` now
+asserts that the flow matches and that peak depth does not move when
+the run doubles.
+
+## 3. Fleet p50 at 100k — pending
+
+Gated: the EC2 fleet costs ~$79/day and is started only for a
+measurement that is ready to be made, then stopped
+(`make stop-instances`, every instance confirmed `stopped`). The
+benchmark gate above is met; the loopback says the number has to come
+from here. Needs, per the plan: `APP_BIN_DIR` in
+`raft-tests/sequencer/Makefile`, an `exchange_admin add-instrument`
+after the gateways start, binaries checksummed on every host (§10.4),
+and `/proc/<pid>/environ` checked for any env flag (§10.3).
 
 ## 4. Fleet sweep — pending (step 6)

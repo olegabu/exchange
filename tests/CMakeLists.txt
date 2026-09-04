@@ -58,3 +58,11 @@ add_dependencies(exchange_fix_end_to_end_test exchange_node_main exchange_fix_ga
 # the state machine, the book and both codecs are called from one
 # thread -- so tsan's value here is the other 39 tests, which run.
 gtest_discover_tests(exchange_fix_end_to_end_test PROPERTIES TIMEOUT 180 LABELS "spawns-brpc")
+
+# Step 6: what the load generator's flow actually does (spec §9.1).
+add_executable(exchange_load_generator_shape_test load_generator_shape_test.cpp)
+target_include_directories(exchange_load_generator_shape_test PRIVATE "${CMAKE_SOURCE_DIR}/bench")
+target_link_libraries(exchange_load_generator_shape_test PRIVATE
+  exchange::state_machine sequencer::bench_load_generator sequencer::fix_session
+  GTest::gtest GTest::gtest_main)
+gtest_discover_tests(exchange_load_generator_shape_test PROPERTIES TIMEOUT 120)
