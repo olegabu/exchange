@@ -36,8 +36,21 @@ it would be close, and pooling the two `std::map` nodes per order
 callback vector is the first thing to try — those are the 1.5–2.9
 allocations per apply.
 
-Not yet measured: `snapshotSave`/`snapshotLoad` at 100k orders (build
-step 4 implements them).
+### Snapshot (build step 4)
+
+Same binary, `--benchmark_filter=Snapshot`; depth is per side, so
+100k is 200k resting orders. Load average was ~10 from a preceding
+build; CPU column again.
+
+| | depth 1k (2k orders) | depth 100k (200k orders) |
+|---|---|---|
+| `snapshotSave` | 0.80 ms, 270 KB | **83 ms, 27 MB** (≈135 B/order) |
+| `snapshotLoad` into a fresh instance | 2.5 ms | **400 ms** (≈3 allocations/order: the order record, the live index, liquibook's tracker) |
+
+Save is what stalls the apply thread: at 200k resting orders, 83 ms
+once per braft snapshot interval. Load happens on a restarting
+replica, off the critical path. Both scale linearly with resting
+orders, not with history.
 
 ## 2. Loopback — pending (step 6)
 

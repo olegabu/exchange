@@ -160,6 +160,12 @@ class OrderBookStateMachine : public sequencer::StateMachine, private book::List
   std::vector<Staged> staged_;
   std::vector<book::OrderId> done_;
   const char* fault_ = nullptr;
+
+  // --- snapshot ----------------------------------------------------------
+  friend class SnapshotVisitor;
+  void clearState() noexcept;
+  bool loading_ = false;  // callbacks during snapshotLoad: accept is silent, a fill is corruption
+  std::vector<std::byte> snapshotBuffer_;
 };
 
 }  // namespace exchange

@@ -79,10 +79,10 @@ std::size_t Book::restingCount() const noexcept { return impl_->bids().size() + 
 
 void Book::walk(Visitor& visitor) const {
   for (const auto& [price, tracker] : impl_->bids()) {
-    visitor.visit(*tracker.ptr());
+    visitor.visit(*tracker.ptr(), tracker.open_qty());
   }
   for (const auto& [price, tracker] : impl_->asks()) {
-    visitor.visit(*tracker.ptr());
+    visitor.visit(*tracker.ptr(), tracker.open_qty());
   }
 }
 

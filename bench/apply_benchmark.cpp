@@ -17,6 +17,10 @@
 #include <string>
 #include <vector>
 
+#include <filesystem>
+
+#include <sequencer/temp_dir.hpp>
+
 #include "harness.hpp"
 
 namespace {
@@ -212,6 +216,44 @@ void BM_Reject(benchmark::State& state) {
   report(state, applies, g_allocations.load() - before);
 }
 
+// spec §9.1: a snapshot stalls the apply thread. Save at `depth`
+// resting orders per side; load into a fresh instance.
+void BM_SnapshotSave(benchmark::State& state) {
+  Bench b(static_cast<int>(state.range(0)));
+  const auto dir = sequencer::makeTempDir("exchange-bench");
+  const auto path = dir / "snapshot";
+  const auto before = g_allocations.load();
+  std::uint64_t saves = 0;
+  for (auto _ : state) {
+    sequencer::SnapshotWriter writer(path);
+    b.sm.snapshotSave(writer);
+    ++saves;
+  }
+  state.counters["bytes"] = static_cast<double>(std::filesystem::file_size(path));
+  report(state, saves, g_allocations.load() - before);
+  std::filesystem::remove_all(dir);
+}
+
+void BM_SnapshotLoad(benchmark::State& state) {
+  Bench b(static_cast<int>(state.range(0)));
+  const auto dir = sequencer::makeTempDir("exchange-bench");
+  const auto path = dir / "snapshot";
+  {
+    sequencer::SnapshotWriter writer(path);
+    b.sm.snapshotSave(writer);
+  }
+  const auto before = g_allocations.load();
+  std::uint64_t loads = 0;
+  for (auto _ : state) {
+    OrderBookStateMachine fresh;
+    sequencer::SnapshotReader reader(path);
+    fresh.snapshotLoad(reader);
+    ++loads;
+  }
+  report(state, loads, g_allocations.load() - before);
+  std::filesystem::remove_all(dir);
+}
+
 }  // namespace
 
 BENCHMARK(BM_RestAndCancel)->Arg(10)->Arg(1000)->Arg(100000)->Unit(benchmark::kMicrosecond);
@@ -219,3 +261,5 @@ BENCHMARK(BM_CrossOneOrder)->Arg(10)->Arg(1000)->Arg(100000)->Unit(benchmark::kM
 BENCHMARK(BM_SweepTenOrders)->Arg(10)->Arg(1000)->Arg(100000)->Unit(benchmark::kMicrosecond);
 BENCHMARK(BM_Replace)->Arg(10)->Arg(1000)->Arg(100000)->Unit(benchmark::kMicrosecond);
 BENCHMARK(BM_Reject)->Arg(10)->Arg(100000)->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_SnapshotSave)->Arg(1000)->Arg(100000)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_SnapshotLoad)->Arg(1000)->Arg(100000)->Unit(benchmark::kMillisecond);

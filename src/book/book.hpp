@@ -45,7 +45,9 @@ class Listener {
 class Visitor {
  public:
   virtual ~Visitor() = default;
-  virtual void visit(const Order& order) = 0;
+  // `openQty` is liquibook's own count for the order; a caller that
+  // keeps its own must find them equal.
+  virtual void visit(const Order& order, Quantity openQty) = 0;
 };
 
 class Book {

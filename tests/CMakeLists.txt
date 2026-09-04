@@ -24,3 +24,9 @@ add_executable(exchange_determinism_test determinism_test.cpp)
 target_link_libraries(exchange_determinism_test PRIVATE
   exchange::state_machine sequencer::replay GTest::gtest GTest::gtest_main sequencer::common)
 gtest_discover_tests(exchange_determinism_test PROPERTIES TIMEOUT 300)
+
+# Step 4: snapshots (spec §6).
+add_executable(exchange_snapshot_test snapshot_test.cpp)
+target_link_libraries(exchange_snapshot_test PRIVATE
+  exchange::state_machine GTest::gtest GTest::gtest_main sequencer::common)
+gtest_discover_tests(exchange_snapshot_test PROPERTIES TIMEOUT 300)

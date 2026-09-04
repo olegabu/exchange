@@ -29,7 +29,8 @@ TEST(OrderBookStateMachine, SnapshotRoundTrips) {
     sequencer::SnapshotWriter writer(path);
     sm.snapshotSave(writer);
   }
-  EXPECT_EQ(std::filesystem::file_size(path), 16u);
+  // Header record (4 + 8 + 28) and end record (4 + 8 + 8): the empty snapshot, frozen.
+  EXPECT_EQ(std::filesystem::file_size(path), 60u);
   exchange::OrderBookStateMachine restored;
   sequencer::SnapshotReader reader(path);
   EXPECT_NO_THROW(restored.snapshotLoad(reader));

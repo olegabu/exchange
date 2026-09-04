@@ -219,4 +219,13 @@ numbers live in `measurements.md`.
   An undecodable or unknown input is a deterministic no-op with no
   output (there is no session to tell); an input from a newer schema
   version stops the node (`docs/liquibook-determinism.md`).
+- Build step 4: a snapshot is length-prefixed SBE records
+  (`src/state_machine/snapshot.hpp`), instruments by symbol then each
+  book bids-then-asks in priority order. Restore re-inserts through
+  `Book::add()`; a restored order is re-accepted silently, and a fill
+  or cancel during restore is corruption (a live book is never crossed
+  — nothing all-or-none ever rests in v1, which is the assumption that
+  makes this true). Exact `cumNotional` travels as 128 bits so a
+  restored replica computes the same `avgPx` on the next fill.
+  `snapshotSave` at 100k resting orders measured in `measurements.md`.
 

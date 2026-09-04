@@ -5,6 +5,10 @@
 #include <stdexcept>
 
 #include <exchange/AddInstrument.h>
+#include <exchange/InstrumentSnapshot.h>
+#include <exchange/OrderSnapshot.h>
+#include <exchange/SnapshotEnd.h>
+#include <exchange/SnapshotHeader.h>
 #include <exchange/CancelOrder.h>
 #include <exchange/InstrumentAdded.h>
 #include <exchange/InstrumentRejected.h>
@@ -18,6 +22,7 @@
 #include <exchange/ReplaceOrder.h>
 #include <exchange/Side.h>
 
+#include "state_machine/snapshot.hpp"
 #include "wire/wire.hpp"
 
 namespace exchange {
@@ -32,10 +37,6 @@ constexpr std::size_t kFillBytes = wire::kHeaderLength + Fill::sbeBlockLength() 
 // written up-front by SBE, patched once the last match is known.
 constexpr std::size_t kFillCountOffset = wire::kHeaderLength + Fill::sbeBlockLength() + 2;
 static_assert(std::endian::native == std::endian::little, "the schema is little-endian; so is the patch");
-
-// Placeholder snapshot until build step 4 (spec §6).
-constexpr std::array<char, 8> kSnapshotMagic{'X', 'C', 'H', 'G', 'S', 'N', 'A', 'P'};
-constexpr std::uint32_t kSnapshotFormatVersion = 0;
 
 template <std::size_t N>
 std::array<char, N> key(const char* field) noexcept {
@@ -466,6 +467,9 @@ void OrderBookStateMachine::onReplaceOrder(sequencer::Payload input) {
 // --- execution callbacks ------------------------------------------------
 
 void OrderBookStateMachine::onAccept(book::Order& o, book::Quantity /*filledSoFar*/) noexcept {
+  if (loading_) {
+    return;  // a restored order is re-accepted silently
+  }
   const auto& order = static_cast<const OrderRecord&>(o);
   const auto slot = nextSmallSlot();
   if (slot.empty()) {
@@ -494,6 +498,12 @@ void OrderBookStateMachine::onReject(book::Order& /*order*/, const char* /*reaso
 
 void OrderBookStateMachine::onFill(book::Order& inbound, book::Order& resting, book::Quantity qty,
                                    book::Price px, bool inboundDone, bool restingDone) noexcept {
+  if (loading_) {
+    // A live book is never crossed, so a snapshot whose orders match
+    // on re-insertion did not come from one.
+    fault("snapshot: orders matched on restore; the snapshot is crossed");
+    return;
+  }
   const auto& taker = static_cast<const OrderRecord&>(inbound);
   const auto& maker = static_cast<const OrderRecord&>(resting);
   addFillEntry(taker, maker, qty, px, true);
@@ -507,6 +517,10 @@ void OrderBookStateMachine::onFill(book::Order& inbound, book::Order& resting, b
 }
 
 void OrderBookStateMachine::onCancel(book::Order& o, book::Quantity /*openQty*/) noexcept {
+  if (loading_) {
+    fault("snapshot: an order was cancelled on restore");
+    return;
+  }
   const auto& order = static_cast<const OrderRecord&>(o);
   CancelReason::Value reason = CancelReason::Requested;
   ClOrdIdKey clOrdId = order.clOrdId;
@@ -651,28 +665,213 @@ void OrderBookStateMachine::fault(const char* what) noexcept {
   }
 }
 
-// --- snapshot (placeholder until step 4) ----------------------------------
+// --- snapshot (spec §6) --------------------------------------------------
+
+namespace {
+
+void putNotional(Int128& field, book::Notional n) noexcept {
+  field.lo(static_cast<std::uint64_t>(n)).hi(static_cast<std::int64_t>(n >> 64));
+}
+
+book::Notional getNotional(Int128& field) noexcept {
+  return (static_cast<book::Notional>(field.hi()) << 64) | static_cast<book::Notional>(field.lo());
+}
+
+}  // namespace
+
+class SnapshotVisitor final : public book::Visitor {
+ public:
+  SnapshotVisitor(sequencer::SnapshotWriter& writer, std::vector<std::byte>& buffer)
+      : writer_(writer), buffer_(buffer) {}
+
+  void visit(const book::Order& o, book::Quantity openQty) override {
+    const auto& order = static_cast<const OrderRecord&>(o);
+    if (order.leavesQty() != openQty) {
+      throw std::runtime_error("snapshotSave: an order's quantities disagree with the book");
+    }
+    auto m = wire::encode<OrderSnapshot>(buffer_);
+    m.orderId(order.id)
+        .sessionId(order.session)
+        .putSenderCompId(order.compId.data())
+        .putAccount(order.account.data())
+        .putClOrdId(order.clOrdId.data())
+        .instrumentId(order.instrumentId)
+        .side(sideOf(order))
+        .ordType(order.ordType)
+        .timeInForce(order.timeInForce)
+        .price(static_cast<std::int64_t>(order.px))
+        .quantity(static_cast<std::int64_t>(order.qty))
+        .cumQty(static_cast<std::int64_t>(order.cumQty))
+        .leavesQty(static_cast<std::int64_t>(order.leavesQty()));
+    putNotional(m.cumNotional(), order.cumNotional);
+    snapshot::writeRecord(writer_, {buffer_.data(), wire::encodedLength(m)});
+    ++written;
+  }
+
+  std::uint64_t written = 0;
+
+ private:
+  sequencer::SnapshotWriter& writer_;
+  std::vector<std::byte>& buffer_;
+};
 
 void OrderBookStateMachine::snapshotSave(sequencer::SnapshotWriter& writer) {
-  writer.write(kSnapshotMagic.data(), kSnapshotMagic.size());
-  writer.write(&kSnapshotFormatVersion, sizeof(kSnapshotFormatVersion));
-  const std::uint32_t reserved = 0;
-  writer.write(&reserved, sizeof(reserved));
+  auto& buffer = snapshotBuffer_;
+  buffer.resize(snapshot::kMaxRecordBytes);
+  {
+    auto m = wire::encode<SnapshotHeader>(buffer);
+    m.formatVersion(snapshot::kFormatVersion)
+        .lastAppliedSeq(lastAppliedSeq_)
+        .nextInstrumentId(nextInstrumentId_)
+        .instrumentCount(static_cast<std::uint32_t>(instruments_.size()))
+        .orderCount(orders_.size());
+    snapshot::writeRecord(writer, {buffer.data(), wire::encodedLength(m)});
+  }
+  SnapshotVisitor visitor(writer, buffer);
+  // Instruments by symbol, then each book bids-then-asks in priority
+  // order: the defined order spec §6 asks for, and the order a restore
+  // re-inserts in.
+  for (const auto& [symbol, id] : symbolIndex_) {
+    const InstrumentState& state = instruments_.at(id);
+    auto m = wire::encode<InstrumentSnapshot>(buffer);
+    m.instrumentId(state.instrument.id)
+        .putSymbol(state.instrument.symbol.data())
+        .tickSize(static_cast<std::int64_t>(state.instrument.tickSize))
+        .lotSize(static_cast<std::int64_t>(state.instrument.lotSize))
+        .maxOrderQty(static_cast<std::int64_t>(state.instrument.maxOrderQty))
+        .marketPrice(static_cast<std::int64_t>(state.book.marketPrice()));
+    snapshot::writeRecord(writer, {buffer.data(), wire::encodedLength(m)});
+    state.book.walk(visitor);
+  }
+  if (visitor.written != orders_.size()) {
+    throw std::runtime_error("snapshotSave: the books and the order index disagree");
+  }
+  auto m = wire::encode<SnapshotEnd>(buffer);
+  m.orderCount(visitor.written);
+  snapshot::writeRecord(writer, {buffer.data(), wire::encodedLength(m)});
+}
+
+void OrderBookStateMachine::clearState() noexcept {
+  orders_.clear();
+  live_.clear();
+  instruments_.clear();
+  symbolIndex_.clear();
+  nextInstrumentId_ = 1;
+  lastAppliedSeq_ = 0;
 }
 
 void OrderBookStateMachine::snapshotLoad(sequencer::SnapshotReader& reader) {
-  std::array<char, 8> magic{};
-  reader.read(magic.data(), magic.size());
-  if (magic != kSnapshotMagic) {
-    throw std::runtime_error("OrderBookStateMachine::snapshotLoad: bad magic");
+  clearState();
+  struct LoadingGuard {
+    bool& flag;
+    explicit LoadingGuard(bool& f) : flag(f) { flag = true; }
+    ~LoadingGuard() { flag = false; }
+  } guard(loading_);
+  fault_ = nullptr;
+  auto& buffer = snapshotBuffer_;
+
+  auto record = snapshot::readRecord(reader, buffer);
+  auto header = wire::decode<SnapshotHeader>(record);
+  if (!header) {
+    throw std::runtime_error("snapshotLoad: not a snapshot");
   }
-  std::uint32_t version = 0;
-  reader.read(&version, sizeof(version));
-  if (version != kSnapshotFormatVersion) {
-    throw std::runtime_error("OrderBookStateMachine::snapshotLoad: unsupported format version");
+  if (header->formatVersion() != snapshot::kFormatVersion) {
+    throw std::runtime_error("snapshotLoad: unsupported snapshot format version");
   }
-  std::uint32_t reserved = 0;
-  reader.read(&reserved, sizeof(reserved));
+  lastAppliedSeq_ = header->lastAppliedSeq();
+  nextInstrumentId_ = header->nextInstrumentId();
+  const std::uint64_t expectedOrders = header->orderCount();
+  const std::uint32_t expectedInstruments = header->instrumentCount();
+
+  InstrumentState* current = nullptr;
+  std::uint64_t loaded = 0;
+  for (;;) {
+    record = snapshot::readRecord(reader, buffer);
+    const auto h = wire::peekHeader(record);
+    if (!h || h->schemaId != SnapshotHeader::sbeSchemaId()) {
+      throw std::runtime_error("snapshotLoad: not a snapshot record");
+    }
+    if (h->templateId == InstrumentSnapshot::sbeTemplateId()) {
+      auto m = wire::decode<InstrumentSnapshot>(record);
+      if (!m) {
+        throw std::runtime_error("snapshotLoad: bad InstrumentSnapshot");
+      }
+      Instrument def;
+      def.id = m->instrumentId();
+      def.symbol = key<8>(m->symbol());
+      const std::int64_t tick = m->tickSize(), lot = m->lotSize(), maxQty = m->maxOrderQty(), mp = m->marketPrice();
+      if (def.id == 0 || def.id >= nextInstrumentId_ || empty(def.symbol) || tick <= 0 || lot <= 0 || maxQty <= 0 ||
+          mp < 0 || symbolIndex_.count(def.symbol) != 0 || instruments_.count(def.id) != 0) {
+        throw std::runtime_error("snapshotLoad: invalid instrument record");
+      }
+      def.tickSize = static_cast<book::Price>(tick);
+      def.lotSize = static_cast<book::Quantity>(lot);
+      def.maxOrderQty = static_cast<book::Quantity>(maxQty);
+      auto [it, inserted] = instruments_.try_emplace(def.id, InstrumentState{def, book::Book(*this)});
+      symbolIndex_.emplace(def.symbol, def.id);
+      current = &it->second;
+      current->book.setMarketPrice(static_cast<book::Price>(mp));
+    } else if (h->templateId == OrderSnapshot::sbeTemplateId()) {
+      auto m = wire::decode<OrderSnapshot>(record);
+      if (!m) {
+        throw std::runtime_error("snapshotLoad: bad OrderSnapshot");
+      }
+      if (current == nullptr || m->instrumentId() != current->instrument.id) {
+        throw std::runtime_error("snapshotLoad: order outside its instrument");
+      }
+      const book::OrderId id = m->orderId();
+      const std::int64_t price = m->price(), qty = m->quantity(), cum = m->cumQty(), leaves = m->leavesQty();
+      if (id == 0 || orders_.count(id) != 0 || !validSide(m->sideRaw()) || !validOrdType(m->ordTypeRaw()) ||
+          !validTimeInForce(m->timeInForceRaw()) || price <= 0 || qty <= 0 || cum < 0 || leaves <= 0 ||
+          cum + leaves != qty) {
+        throw std::runtime_error("snapshotLoad: invalid order record");
+      }
+      auto [it, inserted] = orders_.try_emplace(id);
+      OrderRecord& order = it->second;
+      order.id = id;
+      order.buy = m->sideRaw() == Side::Buy;
+      order.px = static_cast<book::Price>(price);
+      order.qty = static_cast<book::Quantity>(qty);
+      order.cumQty = static_cast<book::Quantity>(cum);
+      order.cumNotional = getNotional(m->cumNotional());
+      order.bookQty = static_cast<book::Quantity>(leaves);  // what liquibook is told: the open quantity
+      order.aon = false;  // nothing all-or-none or immediate ever rests
+      order.ioc = false;
+      order.session = m->sessionId();
+      order.compId = key<16>(m->senderCompId());
+      order.account = key<16>(m->account());
+      order.clOrdId = key<20>(m->clOrdId());
+      order.instrumentId = current->instrument.id;
+      order.symbol = current->instrument.symbol;
+      order.ordType = static_cast<OrdType::Value>(m->ordTypeRaw());
+      order.timeInForce = static_cast<TimeInForce::Value>(m->timeInForceRaw());
+      if (empty(order.compId) || empty(order.clOrdId) ||
+          !live_.emplace(LiveKey{order.compId, order.clOrdId}, order.id).second) {
+        throw std::runtime_error("snapshotLoad: duplicate or empty order identity");
+      }
+      // The same insertion path a live order takes (spec §6).
+      current->book.add(order);
+      if (fault_ != nullptr) {
+        throw std::runtime_error(std::string("snapshotLoad: ") + fault_);
+      }
+      ++loaded;
+    } else if (h->templateId == SnapshotEnd::sbeTemplateId()) {
+      auto m = wire::decode<SnapshotEnd>(record);
+      if (!m || m->orderCount() != loaded || loaded != expectedOrders || instruments_.size() != expectedInstruments) {
+        throw std::runtime_error("snapshotLoad: record counts disagree");
+      }
+      break;
+    } else {
+      throw std::runtime_error("snapshotLoad: unexpected record");
+    }
+  }
+  std::size_t resting = 0;
+  for (const auto& [id, state] : instruments_) {
+    resting += state.book.restingCount();
+  }
+  if (resting != orders_.size()) {
+    throw std::runtime_error("snapshotLoad: the books and the order index disagree");
+  }
 }
 
 }  // namespace exchange
