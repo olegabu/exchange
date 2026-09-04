@@ -176,23 +176,65 @@ caught only by trying to make it fail.
 **This did not move the knee**, so it was a real defect in the
 measurement, not the cause of the ceiling.
 
-### Where it stands
+### What the ceiling actually was
 
-The ceiling is ~25k for the matching flow against 343k for the same
-flow without matching, on hardware that does 400k with the counter,
-with no component CPU-saturated and the apply thread costing 1 µs.
-That combination — a hard throughput limit with nothing busy — is a
-*blocking* path, not a compute-bound one.
+liquibook locates an order for `cancel` and `replace` by **scanning its
+price level** (`find_on_market` walks the multimap comparing pointers),
+so both are O(orders resting at that price). The load generator's band
+was five ticks either side of the mid, which put the entire book into
+eleven prices — nothing like a real venue — and made that scan the
+dominant cost of `apply()`.
 
-Next, in order:
+The probe that found it was the same one that had said "1 µs": the
+earlier figure was measured at 10k with a nearly empty book, and does
+not hold at scale. Re-armed at the knee it read very differently, and
+the fix is visible in one number:
 
-1. A flow variant of maker-then-cancel only: bounded book, one output
-   per input, **no fills**. It separates "fills are expensive" from
-   "having a book at all is expensive", which is the last big fork.
-2. A release build **without `-s`** so `perf` can resolve symbols; the
-   node profile was 95% inside 400 bytes of stripped code.
-3. If those do not settle it, `SEQ_SEGMENT_OPEN_US` / `SEQ_TAIL_STALL_US`
-   on the output side, which is the half no probe has covered yet.
+| at 45,000/s | `apply()` p50 | p50 latency | achieved |
+|---|---|---|---|
+| 11 price levels | **131 µs** | 2.46 ms | 43,813 |
+| 1,001 price levels | **1 µs** | 1.06 ms | 44,712 |
+
+131× less work per input from spreading the same book over more
+prices, with the **same match rate per record** (0.29 either way) and a
+book of ~5.5k orders instead of ~22k — so this is not throughput bought
+by matching less.
+
+### The ladder after the fix
+
+Same fleet, same gateway, band widened to what a venue looks like:
+
+| offered | achieved | p50 | dropped |
+|---|---|---|---|
+| 10,000 | 9,995 | 871 µs | 0 |
+| 25,000 | 24,994 | 921 µs | 0 |
+| 50,000 | 42,133 | 1,025 µs | 12,724 |
+| 75,000 | 55,339 | 1,136 µs | 35,701 |
+| 100,000 | 73,114 | **1,311 µs** | 75,951 |
+| 150,000 | 106,890 | 8.2 ms | 259,874 |
+| 200,000 | **124,899** | 86 ms | 1.2M |
+| 250,000–500,000 | 109k → 64k | 157 ms → 550 ms | rising |
+
+**p50 stays near 1 ms through 100,000 offered, and the peak achieved
+rate is ~125,000/s** — five times the first sweep's ~25k. `spec.md`
+§9.1's latency target (interface p50 + ≤100 µs) is met at 100k: 1,311 µs
+against the counter's 1,005 µs on the same fleet, so the matching
+engine is costing about 300 µs of round trip, not milliseconds.
+
+The remaining gap to `sequencer-fix`'s 400k is what an exchange
+actually buys: 288 B records against 16 B, 1.57 FIX messages out per
+input against 1, and a book to maintain.
+
+### Still open
+
+- **Cancel/replace stays O(depth at a price).** Harmless with a wide
+  book, dominant with a narrow one, so an instrument whose liquidity
+  sits at one or two prices would hit it. The fix is an index from
+  order identity to book position, which is a change to the vendored
+  matcher: `liquibook-determinism.md` records it as v2 work.
+- Between 50k and 150k the rig drops rise while p50 stays near 1 ms,
+  which is the client's in-flight cap binding rather than the exchange
+  slowing; a run with a larger `--max_inflight` would separate them.
 
 ## 4. Fleet p50 at 100k — superseded
 

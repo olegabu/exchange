@@ -112,7 +112,22 @@ inline constexpr int kClOrdIdTag = 11;
 struct OrderShape {
   std::string symbol = "ABC";
   std::int64_t midTicks = 10000;   // 100.00 at a 0.01 tick
-  std::int64_t priceLevels = 5;    // how wide the band makers rest in
+  // How wide the band makers rest in -- and therefore DEPTH PER PRICE
+  // LEVEL, which is the single most important property of this flow.
+  //
+  // It was 5, which put the entire book into eleven price levels. That
+  // is not what a venue looks like, and it made liquibook's
+  // cancel/replace the dominant cost: it locates an order by SCANNING
+  // its price level, so cost is linear in depth at that price. Measured
+  // at 45k on the fleet, changing only this number:
+  //
+  //     5 levels    apply 131us p50, 43,813 achieved, p50 2.46ms
+  //   500 levels    apply   1us p50, 44,712 achieved, p50 1.06ms
+  //
+  // 131x less work in apply(), same matching (0.29 matches per record
+  // either way), and a book that stays around 5k orders instead of
+  // 22k. Over the full ladder the knee moved from ~25k to ~125k.
+  std::int64_t priceLevels = 500;
   std::int64_t quantityLots = 1;
 };
 

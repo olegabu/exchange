@@ -323,4 +323,14 @@ numbers live in `measurements.md`.
   the test now replays five phase-staggered sessions and was proven to
   fail on the defect before the fix was trusted. Fixing it did not move
   the knee: it was a defect in the measurement, not the ceiling.
+- The ~25k knee was liquibook's cancel/replace being O(orders resting
+  at that price), amplified by a load-generator band that packed the
+  whole book into eleven prices. Widening it to a realistic band cut
+  `apply()` from 131 µs to 1 µs at the same rate and moved the knee to
+  ~125k, with p50 near 1 ms through 100k offered and the same match
+  rate per record. The finding that mattered was methodological: the
+  "apply costs 1 µs" measurement that exonerated the state machine had
+  been taken at 10k with an almost empty book, and did not hold at
+  scale — a probe armed in the wrong regime is as misleading as no
+  probe (`measurements.md` §3).
 

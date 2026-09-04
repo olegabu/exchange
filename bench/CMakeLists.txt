@@ -14,3 +14,10 @@ target_include_directories(exchange_load_generator_main PRIVATE "${CMAKE_CURRENT
 target_link_libraries(exchange_load_generator_main PRIVATE
   sequencer::bench_load_generator sequencer::fix_session
   gflags::gflags_static glog::glog sequencer::common)
+
+# The output codec's cost per journal record: a hard ceiling on records
+# per second, because it runs on the output gateway's single
+# journal-tail thread (docs/spec.md §9.1, measurements.md §3).
+add_executable(output_codec_benchmark output_codec_benchmark.cpp)
+target_link_libraries(output_codec_benchmark PRIVATE
+  exchange::fix_output_codec benchmark::benchmark benchmark::benchmark_main)

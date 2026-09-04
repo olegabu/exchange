@@ -20,6 +20,49 @@ keeps the grep half of this table true across upstream bumps.
 | Bounded allocation | Per call: `callbacks_` is a `std::vector` reserved to 16, so a sweep past 16 callbacks reallocates; `DeferredMatches` is a `std::list` (AON only); `try_create_deferred_trades` builds a `std::vector<int>` (AON only). Our side: one `std::map` node per live order, freed on retirement. Accepted for v1 and measured by `bench/apply_benchmark.cpp` (spec §9.1); pools are the fix if the budget is missed. | `order_book.h:327` (`reserve(16)`), `order_book.h:65`, `try_create_deferred_trades` |
 | No I/O on the apply path | Three `std::cerr` sites, none on a successful path: a one-time warning inside two **deprecated** methods we never call (`move_callbacks`, `perform_callbacks`), and the two `catch` blocks in `callback_now()` that swallow an exception thrown by a listener. Our listener (`OrderBookStateMachine`, all callbacks `noexcept`) never throws; anything impossible is recorded with `fault()` and turned into a thrown error after the book call returns, so every replica stops on the same input instead of one logging and continuing. The allowlist in `vendor/liquibook/io-allowlist.txt` pins these three lines. | `order_book.h:33,1124,1135`; `src/book/book.hpp` contract; `order_book_state_machine.cpp` `fault()` / `finishInput()` |
 
+## Performance: cancel and replace are linear in depth at a price
+
+Not a determinism issue -- it is deterministic -- but the dominant cost
+in the first fleet sweep, so it belongs next to the rest of what this
+file records about the vendored code.
+
+`OrderBook::find_on_market` locates an order by starting at its price
+and **walking the multimap comparing order pointers**:
+
+```cpp
+for (result = sideMap.find(key); result != sideMap.end(); ++result) {
+  if (result->second.ptr() == order) return true;
+  else if (key < result->first) { result = sideMap.end(); return false; }
+}
+```
+
+Every `cancel()` and every `replace()` pays it, so both are **O(orders
+resting at that price)**. With a book spread over many prices that is
+nothing; with a deep single level it is the whole cost, and it degrades
+as the book grows.
+
+Measured on the fleet at 45,000 orders/s, changing only how many price
+levels the load generator uses:
+
+| band | `apply()` p50 | p50 latency | achieved |
+|---|---|---|---|
+| 11 levels | **131 µs** | 2.46 ms | 43,813 |
+| 1,001 levels | **1 µs** | 1.06 ms | 44,712 |
+
+Same match rate per record either way. The first sweep's ~25k knee was
+mostly this: a benchmark flow that concentrated the entire book into
+eleven prices (`measurements.md` §3).
+
+**What this means for the exchange.** A real venue has depth spread
+over many prices, so the default flow now uses a wide band and the
+effect is small. But an instrument whose liquidity genuinely sits at
+one or two prices -- a pegged or heavily banded market -- would hit it,
+and so would any client that cancels deep in a queue. The fix is an
+index from order identity to its position in the book, so cancel and
+replace are a lookup rather than a scan. That is a change to the
+vendored matcher and is v2 work; it is recorded here so the next person
+does not rediscover it from a latency chart.
+
 ## Hazards found while reading, and what guards them
 
 - **`(int)` casts on the replace path** clamped any open quantity above
