@@ -9,7 +9,7 @@ add_library(exchange::state_machine ALIAS exchange_state_machine)
 target_include_directories(exchange_state_machine PUBLIC
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>"
 )
-target_link_libraries(exchange_state_machine PUBLIC sequencer::node exchange::liquibook)
+target_link_libraries(exchange_state_machine PUBLIC sequencer::node exchange::liquibook exchange::sbe)
 target_compile_features(exchange_state_machine PUBLIC cxx_std_20)
 
 # --- executables -------------------------------------------------------

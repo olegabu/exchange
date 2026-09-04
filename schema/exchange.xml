@@ -1,0 +1,312 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The exchange wire format: braft log payloads, journal inputs and
+  outputs, and snapshot records (docs/spec.md §4, §6).
+
+  APPEND-ONLY ONCE WRITTEN. Fields are located by computed offset, so a
+  field may be appended (bump `version`), never reordered, resized or
+  removed. Every schema version ever journaled must stay describable
+  (design.md §2). Review a layout before generating it.
+
+  Numbers: Price and Qty are int64 in units of 10^-8 (PriceExponent);
+  liquibook sees plain integers. No floating point anywhere.
+
+  Identity: every inbound starts sessionId/senderCompId/account/clOrdId;
+  every outbound starts with the addressee sessionId, because the output
+  codec sees only the journal record and must route from it alone.
+-->
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="exchange"
+                   id="1"
+                   version="0"
+                   semanticVersion="1.0.0"
+                   description="total-order exchange, v1 CLOB"
+                   byteOrder="littleEndian">
+  <types>
+    <composite name="messageHeader" description="Standard SBE message header">
+      <type name="blockLength" primitiveType="uint16"/>
+      <type name="templateId"  primitiveType="uint16"/>
+      <type name="schemaId"    primitiveType="uint16"/>
+      <type name="version"     primitiveType="uint16"/>
+    </composite>
+    <composite name="groupSizeEncoding" description="Repeating group dimensions">
+      <type name="blockLength" primitiveType="uint16"/>
+      <type name="numInGroup"  primitiveType="uint16"/>
+    </composite>
+
+    <!-- Fixed-point integers. PriceExponent is the scale for both. -->
+    <type name="Price"         primitiveType="int64" description="Units of 10^PriceExponent"/>
+    <type name="Qty"           primitiveType="int64" description="Units of 10^PriceExponent"/>
+    <type name="PriceExponent" primitiveType="int8" presence="constant">-8</type>
+    <!-- Exact notional (Price * Qty) does not fit int64; kept as 128 bits in snapshots. -->
+    <composite name="Int128" description="Two's-complement 128-bit integer, little-endian halves">
+      <type name="lo" primitiveType="uint64"/>
+      <type name="hi" primitiveType="int64"/>
+    </composite>
+
+    <!-- Identity -->
+    <type name="SessionId"    primitiveType="uint64" description="The gateway's routing id for the FIX session"/>
+    <type name="OrderId"      primitiveType="uint64" description="The sequence number of the accepting NewOrder; 0 = none"/>
+    <type name="InstrumentId" primitiveType="uint32" description="Assigned by AddInstrument; 0 = none"/>
+    <type name="Symbol"       primitiveType="char" length="8"  description="FIX tag 55, right-padded with NUL"/>
+    <type name="CompId"       primitiveType="char" length="16" description="FIX tag 49 SenderCompID"/>
+    <type name="Account"      primitiveType="char" length="16" description="FIX tag 1; empty if absent"/>
+    <type name="ClOrdId"      primitiveType="char" length="20" description="FIX tag 11 / 41"/>
+
+    <enum name="Side" encodingType="uint8" description="FIX tag 54">
+      <validValue name="Buy">1</validValue>
+      <validValue name="Sell">2</validValue>
+    </enum>
+    <enum name="OrdType" encodingType="uint8" description="FIX tag 40">
+      <validValue name="Market">1</validValue>
+      <validValue name="Limit">2</validValue>
+    </enum>
+    <enum name="TimeInForce" encodingType="uint8" description="FIX tag 59">
+      <validValue name="Day">0</validValue>
+      <validValue name="GoodTillCancel">1</validValue>
+      <validValue name="ImmediateOrCancel">3</validValue>
+      <validValue name="FillOrKill">4</validValue>
+    </enum>
+    <enum name="Bool" encodingType="uint8">
+      <validValue name="False">0</validValue>
+      <validValue name="True">1</validValue>
+    </enum>
+    <enum name="RejectReason" encodingType="uint8" description="Why admission said no; touches no state">
+      <validValue name="MalformedMessage">1</validValue>
+      <validValue name="UnknownInstrument">2</validValue>
+      <validValue name="InstrumentExists">3</validValue>
+      <validValue name="InvalidInstrument">4</validValue>
+      <validValue name="PriceNotOnTick">5</validValue>
+      <validValue name="QuantityNotOnLot">6</validValue>
+      <validValue name="QuantityTooLarge">7</validValue>
+      <validValue name="DuplicateClOrdId">8</validValue>
+      <validValue name="UnknownOrder">9</validValue>
+      <validValue name="NotOrderOwner">10</validValue>
+      <validValue name="UnsupportedOrdType">11</validValue>
+      <validValue name="UnsupportedTimeInForce">12</validValue>
+      <validValue name="SideMismatch">13</validValue>
+      <validValue name="NotAuthorized">14</validValue>
+    </enum>
+    <enum name="CancelReason" encodingType="uint8">
+      <validValue name="Requested">1</validValue>
+      <validValue name="ImmediateOrCancelRemainder">2</validValue>
+      <validValue name="FillOrKillUnfilled">3</validValue>
+      <validValue name="Replaced">4</validValue>
+    </enum>
+  </types>
+
+  <!-- ===================== Inbound: proposed, replicated, journaled as input ===================== -->
+
+  <sbe:message name="AddInstrument" id="1" description="Sequenced instrument static data (spec §4)">
+    <field name="sessionId"     id="1" type="SessionId"/>
+    <field name="senderCompId"  id="2" type="CompId"/>
+    <field name="account"       id="3" type="Account"/>
+    <field name="clOrdId"       id="4" type="ClOrdId" description="Request id, echoed on InstrumentAdded/Rejected"/>
+    <field name="symbol"        id="5" type="Symbol"/>
+    <field name="tickSize"      id="6" type="Price"/>
+    <field name="lotSize"       id="7" type="Qty"/>
+    <field name="maxOrderQty"   id="8" type="Qty" description="Bounds matches per input: maxOrderQty/lotSize &lt;= kMaxMatchesPerInput"/>
+  </sbe:message>
+
+  <sbe:message name="NewOrder" id="2" description="FIX 35=D">
+    <field name="sessionId"     id="1" type="SessionId"/>
+    <field name="senderCompId"  id="2" type="CompId"/>
+    <field name="account"       id="3" type="Account"/>
+    <field name="clOrdId"       id="4" type="ClOrdId"/>
+    <field name="symbol"        id="5" type="Symbol"/>
+    <field name="side"          id="6" type="Side"/>
+    <field name="ordType"       id="7" type="OrdType"/>
+    <field name="timeInForce"   id="8" type="TimeInForce"/>
+    <field name="price"         id="9" type="Price" description="0 for Market"/>
+    <field name="quantity"      id="10" type="Qty"/>
+    <field name="priceExponent" id="11" type="PriceExponent"/>
+  </sbe:message>
+
+  <sbe:message name="CancelOrder" id="3" description="FIX 35=F">
+    <field name="sessionId"     id="1" type="SessionId"/>
+    <field name="senderCompId"  id="2" type="CompId"/>
+    <field name="account"       id="3" type="Account"/>
+    <field name="clOrdId"       id="4" type="ClOrdId"/>
+    <field name="origClOrdId"   id="5" type="ClOrdId"/>
+    <field name="symbol"        id="6" type="Symbol"/>
+    <field name="side"          id="7" type="Side"/>
+  </sbe:message>
+
+  <sbe:message name="ReplaceOrder" id="4" description="FIX 35=G">
+    <field name="sessionId"     id="1" type="SessionId"/>
+    <field name="senderCompId"  id="2" type="CompId"/>
+    <field name="account"       id="3" type="Account"/>
+    <field name="clOrdId"       id="4" type="ClOrdId"/>
+    <field name="origClOrdId"   id="5" type="ClOrdId"/>
+    <field name="symbol"        id="6" type="Symbol"/>
+    <field name="side"          id="7" type="Side"/>
+    <field name="quantity"      id="8" type="Qty" description="New total order quantity"/>
+    <field name="price"         id="9" type="Price"/>
+  </sbe:message>
+
+  <!-- ===================== Outbound: emitted by apply(), journaled as outputs ===================== -->
+
+  <sbe:message name="OrderAccepted" id="101" description="FIX 35=8 150=0">
+    <field name="sessionId"     id="1" type="SessionId"/>
+    <field name="senderCompId"  id="2" type="CompId"/>
+    <field name="account"       id="3" type="Account"/>
+    <field name="clOrdId"       id="4" type="ClOrdId"/>
+    <field name="orderId"       id="5" type="OrderId"/>
+    <field name="instrumentId"  id="6" type="InstrumentId"/>
+    <field name="symbol"        id="7" type="Symbol"/>
+    <field name="side"          id="8" type="Side"/>
+    <field name="ordType"       id="9" type="OrdType"/>
+    <field name="timeInForce"   id="10" type="TimeInForce"/>
+    <field name="price"         id="11" type="Price"/>
+    <field name="quantity"      id="12" type="Qty"/>
+  </sbe:message>
+
+  <sbe:message name="OrderRejected" id="102" description="FIX 35=8 150=8">
+    <field name="sessionId"     id="1" type="SessionId"/>
+    <field name="senderCompId"  id="2" type="CompId"/>
+    <field name="account"       id="3" type="Account"/>
+    <field name="clOrdId"       id="4" type="ClOrdId"/>
+    <field name="symbol"        id="5" type="Symbol"/>
+    <field name="side"          id="6" type="Side"/>
+    <field name="ordType"       id="7" type="OrdType"/>
+    <field name="timeInForce"   id="8" type="TimeInForce"/>
+    <field name="price"         id="9" type="Price"/>
+    <field name="quantity"      id="10" type="Qty"/>
+    <field name="reason"        id="11" type="RejectReason"/>
+  </sbe:message>
+
+  <sbe:message name="Fill" id="103" description="All matches of one input; one entry per party per match; entry -> FIX 35=8 150=F">
+    <field name="instrumentId"  id="1" type="InstrumentId"/>
+    <field name="symbol"        id="2" type="Symbol"/>
+    <group name="executions" id="10" dimensionType="groupSizeEncoding">
+      <field name="sessionId"           id="11" type="SessionId"/>
+      <field name="senderCompId"        id="12" type="CompId"/>
+      <field name="account"             id="13" type="Account"/>
+      <field name="clOrdId"             id="14" type="ClOrdId"/>
+      <field name="orderId"             id="15" type="OrderId"/>
+      <field name="side"                id="16" type="Side"/>
+      <field name="lastPx"              id="17" type="Price"/>
+      <field name="lastQty"             id="18" type="Qty"/>
+      <field name="leavesQty"           id="19" type="Qty"/>
+      <field name="cumQty"              id="20" type="Qty"/>
+      <field name="avgPx"               id="21" type="Price" description="Exact notional / cumQty, truncated"/>
+      <field name="counterpartyOrderId" id="22" type="OrderId"/>
+      <field name="aggressor"           id="23" type="Bool"/>
+    </group>
+  </sbe:message>
+
+  <sbe:message name="OrderCancelled" id="104" description="FIX 35=8 150=4">
+    <field name="sessionId"     id="1" type="SessionId"/>
+    <field name="senderCompId"  id="2" type="CompId"/>
+    <field name="account"       id="3" type="Account"/>
+    <field name="clOrdId"       id="4" type="ClOrdId" description="The cancel's own id; equals origClOrdId for an IOC/FOK remainder"/>
+    <field name="origClOrdId"   id="5" type="ClOrdId"/>
+    <field name="orderId"       id="6" type="OrderId"/>
+    <field name="instrumentId"  id="7" type="InstrumentId"/>
+    <field name="symbol"        id="8" type="Symbol"/>
+    <field name="side"          id="9" type="Side"/>
+    <field name="reason"        id="10" type="CancelReason"/>
+    <field name="price"         id="11" type="Price"/>
+    <field name="quantity"      id="12" type="Qty" description="Order quantity at cancellation"/>
+    <field name="cumQty"        id="13" type="Qty"/>
+  </sbe:message>
+
+  <sbe:message name="OrderCancelRejected" id="105" description="FIX 35=9 434=1">
+    <field name="sessionId"     id="1" type="SessionId"/>
+    <field name="senderCompId"  id="2" type="CompId"/>
+    <field name="account"       id="3" type="Account"/>
+    <field name="clOrdId"       id="4" type="ClOrdId"/>
+    <field name="origClOrdId"   id="5" type="ClOrdId"/>
+    <field name="orderId"       id="6" type="OrderId" description="0 if unknown"/>
+    <field name="symbol"        id="7" type="Symbol"/>
+    <field name="reason"        id="8" type="RejectReason"/>
+  </sbe:message>
+
+  <sbe:message name="OrderReplaced" id="106" description="FIX 35=8 150=5">
+    <field name="sessionId"     id="1" type="SessionId"/>
+    <field name="senderCompId"  id="2" type="CompId"/>
+    <field name="account"       id="3" type="Account"/>
+    <field name="clOrdId"       id="4" type="ClOrdId" description="The order's new id"/>
+    <field name="origClOrdId"   id="5" type="ClOrdId"/>
+    <field name="orderId"       id="6" type="OrderId" description="Unchanged by a replace"/>
+    <field name="instrumentId"  id="7" type="InstrumentId"/>
+    <field name="symbol"        id="8" type="Symbol"/>
+    <field name="side"          id="9" type="Side"/>
+    <field name="price"         id="10" type="Price"/>
+    <field name="quantity"      id="11" type="Qty"/>
+    <field name="leavesQty"     id="12" type="Qty"/>
+    <field name="cumQty"        id="13" type="Qty"/>
+  </sbe:message>
+
+  <sbe:message name="OrderReplaceRejected" id="107" description="FIX 35=9 434=2">
+    <field name="sessionId"     id="1" type="SessionId"/>
+    <field name="senderCompId"  id="2" type="CompId"/>
+    <field name="account"       id="3" type="Account"/>
+    <field name="clOrdId"       id="4" type="ClOrdId"/>
+    <field name="origClOrdId"   id="5" type="ClOrdId"/>
+    <field name="orderId"       id="6" type="OrderId"/>
+    <field name="symbol"        id="7" type="Symbol"/>
+    <field name="reason"        id="8" type="RejectReason"/>
+  </sbe:message>
+
+  <sbe:message name="InstrumentAdded" id="108">
+    <field name="sessionId"     id="1" type="SessionId"/>
+    <field name="senderCompId"  id="2" type="CompId"/>
+    <field name="account"       id="3" type="Account"/>
+    <field name="clOrdId"       id="4" type="ClOrdId"/>
+    <field name="instrumentId"  id="5" type="InstrumentId"/>
+    <field name="symbol"        id="6" type="Symbol"/>
+    <field name="tickSize"      id="7" type="Price"/>
+    <field name="lotSize"       id="8" type="Qty"/>
+    <field name="maxOrderQty"   id="9" type="Qty"/>
+  </sbe:message>
+
+  <sbe:message name="InstrumentRejected" id="109">
+    <field name="sessionId"     id="1" type="SessionId"/>
+    <field name="senderCompId"  id="2" type="CompId"/>
+    <field name="account"       id="3" type="Account"/>
+    <field name="clOrdId"       id="4" type="ClOrdId"/>
+    <field name="symbol"        id="5" type="Symbol"/>
+    <field name="reason"        id="6" type="RejectReason"/>
+  </sbe:message>
+
+  <!-- ===================== Snapshot records (spec §6): instrument, side, price priority, time priority ===================== -->
+
+  <sbe:message name="SnapshotHeader" id="201">
+    <field name="formatVersion"    id="1" type="uint32"/>
+    <field name="lastAppliedSeq"   id="2" type="uint64" description="Sequence number of the last input applied before this snapshot"/>
+    <field name="nextInstrumentId" id="3" type="InstrumentId"/>
+    <field name="instrumentCount"  id="4" type="uint32"/>
+    <field name="orderCount"       id="5" type="uint64"/>
+  </sbe:message>
+
+  <sbe:message name="InstrumentSnapshot" id="202">
+    <field name="instrumentId"  id="1" type="InstrumentId"/>
+    <field name="symbol"        id="2" type="Symbol"/>
+    <field name="tickSize"      id="3" type="Price"/>
+    <field name="lotSize"       id="4" type="Qty"/>
+    <field name="maxOrderQty"   id="5" type="Qty"/>
+    <field name="marketPrice"   id="6" type="Price" description="liquibook's last trade price for this book; 0 if none"/>
+  </sbe:message>
+
+  <sbe:message name="OrderSnapshot" id="203" description="One resting order, in book order; rebuilt through the live insertion path">
+    <field name="orderId"       id="1" type="OrderId"/>
+    <field name="sessionId"     id="2" type="SessionId"/>
+    <field name="senderCompId"  id="3" type="CompId"/>
+    <field name="account"       id="4" type="Account"/>
+    <field name="clOrdId"       id="5" type="ClOrdId"/>
+    <field name="instrumentId"  id="6" type="InstrumentId"/>
+    <field name="side"          id="7" type="Side"/>
+    <field name="ordType"       id="8" type="OrdType"/>
+    <field name="timeInForce"   id="9" type="TimeInForce"/>
+    <field name="price"         id="10" type="Price"/>
+    <field name="quantity"      id="11" type="Qty" description="Current order quantity (after replaces)"/>
+    <field name="cumQty"        id="12" type="Qty"/>
+    <field name="leavesQty"     id="13" type="Qty"/>
+    <field name="cumNotional"   id="14" type="Int128" description="Exact sum of lastPx*lastQty; what avgPx is computed from"/>
+  </sbe:message>
+
+  <sbe:message name="SnapshotEnd" id="204">
+    <field name="orderCount"    id="1" type="uint64" description="Must equal SnapshotHeader.orderCount"/>
+  </sbe:message>
+</sbe:messageSchema>

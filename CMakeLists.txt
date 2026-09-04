@@ -65,6 +65,15 @@ if(EXCHANGE_BUILD_TESTS OR EXCHANGE_BUILD_BENCHMARKS)
 endif()
 
 add_subdirectory(vendor/liquibook)
+
+# The checked-in SBE codecs (docs/spec.md §3.2, §4). SYSTEM: generated
+# code is not held to this repository's warning flags.
+add_library(exchange_sbe INTERFACE)
+add_library(exchange::sbe ALIAS exchange_sbe)
+target_include_directories(exchange_sbe SYSTEM INTERFACE
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/generated>"
+)
+target_compile_features(exchange_sbe INTERFACE cxx_std_20)
 add_subdirectory(src)
 if(EXCHANGE_BUILD_TESTS)
   add_subdirectory(tests)
