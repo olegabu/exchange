@@ -1,4 +1,7 @@
-build/
-__pycache__/
-*.pyc
 CLAUDE.md
+build/
+vcpkg_installed/
+compile_commands.json
+.cache/
+Testing/
+*.log

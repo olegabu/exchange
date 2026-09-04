@@ -1,0 +1,3 @@
+vendor/liquibook/src/book/order_book.h:33:    std::cerr << "One-time Warning: " << message << std::endl; \
+vendor/liquibook/src/book/order_book.h:1124:            std::cerr << "Caught exception during callback: " << ex.what() << std::endl;
+vendor/liquibook/src/book/order_book.h:1135:            std::cerr << "Caught unknown exception during callback" << std::endl;
