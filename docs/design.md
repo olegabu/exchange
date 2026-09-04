@@ -275,4 +275,22 @@ numbers live in `measurements.md`.
   already echoes, so no private tag and no FIFO fallback: a reply that
   cannot be correlated is one this sender did not cause. What is
   measured is NewOrderSingle to its first ExecutionReport.
+- The load generator's flow sends all three order-entry messages, in a
+  seven-message cycle that nets to zero: place/hit, place/cancel,
+  place/replace/hit. Sending only NewOrderSingle would measure one of
+  the exchange's three paths, and real venues see more cancels than
+  trades. The fanout distributes whole CYCLES rather than messages,
+  because a cancel or replace references the maker sent immediately
+  before it and a ClOrdID is scoped to its CompID — splitting a cycle
+  across sessions would reject every cancel and replace, and the sweep
+  would measure rejects. The consequence is that a SINGLE-session run
+  matches a client against itself, which is legal only while
+  self-trade prevention is v2 (spec §11); when STP lands, this flow
+  changes with it. On the fleet it is largely moot: every client quotes
+  the same band on the same symbol, so a taker usually crosses somebody
+  else's maker.
+- `tests/load_generator_shape_test.cpp` drives the generator's OWN
+  bytes through the real input codec rather than approximating them:
+  "the flow is admissible" and "the flow encodes to FIX the codec
+  accepts" are different claims.
 

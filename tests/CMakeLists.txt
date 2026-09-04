@@ -63,6 +63,6 @@ gtest_discover_tests(exchange_fix_end_to_end_test PROPERTIES TIMEOUT 180 LABELS 
 add_executable(exchange_load_generator_shape_test load_generator_shape_test.cpp)
 target_include_directories(exchange_load_generator_shape_test PRIVATE "${CMAKE_SOURCE_DIR}/bench")
 target_link_libraries(exchange_load_generator_shape_test PRIVATE
-  exchange::state_machine sequencer::bench_load_generator sequencer::fix_session
-  GTest::gtest GTest::gtest_main)
+  exchange::state_machine exchange::fix_input_codec sequencer::bench_load_generator
+  sequencer::fix_session GTest::gtest GTest::gtest_main)
 gtest_discover_tests(exchange_load_generator_shape_test PROPERTIES TIMEOUT 120)

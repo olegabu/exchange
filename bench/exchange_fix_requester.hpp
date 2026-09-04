@@ -61,32 +61,53 @@ using sequencer::bench::LoadGeneratorRequester;
 // FIX tags this sender reads and writes.
 inline constexpr int kClOrdIdTag = 11;
 
-// The shape of the order flow, and the reason it is shaped this way.
+// The shape of the order flow, and the reasons it is shaped this way.
 //
-// MAKERS AND TAKERS ALTERNATE, one for one, so the resting book stays
-// bounded however long the run is. Each maker rests a lot inside the
-// band; the taker that follows it prices through the whole band on the
-// opposite side, so it crosses exactly one lot and the pair nets out.
-// The roles swap sides every other pair, so both sides of the book are
-// exercised.
+// A benchmark measures whatever its inputs actually do, so the flow is
+// a designed artefact with two invariants, both asserted by
+// tests/load_generator_shape_test.cpp:
 //
-// Two shapes were tried before this one, and both were wrong in a way
-// only a run showed:
+//   1. IT MATCHES. A run that only rests orders measures a book
+//      growing, not an exchange matching.
+//   2. DEPTH IS BOUNDED. Independent of run length -- a seventeen-rate
+//      sweep shares one cluster, so anything that grows linearly ends
+//      the ladder with tens of millions of resting orders.
 //
-//   1. Buys stepping DOWN from the mid, sells stepping UP. The sides
-//      never overlap, so only orders exactly at the mid matched and
-//      every other order rested forever -- a 30s run at 100k would end
-//      with ~3M resting orders and would have measured a book growing,
-//      not an exchange matching.
-//   2. Both sides walking the SAME band. Far better -- a quarter of
-//      the flow matched -- but buys still accumulated at the bottom of
-//      the band and sells at the top, ~9% of orders, which is linear
-//      in run length. A seventeen-rate sweep shares one cluster, so
-//      that is tens of millions of resting orders by the end of the
-//      ladder.
+// It also exercises ALL THREE order-entry messages, because an
+// exchange that is only ever measured on NewOrderSingle is measured on
+// one of its three paths, and real venues see more cancels than
+// trades.
 //
-// Both were caught by a loopback run and by the assertions in
-// tests/load_generator_shape_test.cpp, before any fleet time
+// The cycle is seven messages and nets to zero:
+//
+//   0  35=D  maker rests inside the band
+//   1  35=D  taker prices through the band  -> matches step 0
+//   2  35=D  maker rests
+//   3  35=F  cancels step 2                 -> nothing rests
+//   4  35=D  maker rests
+//   5  35=G  replaces step 4 to a new price -> still rests
+//   6  35=D  taker prices through the band  -> matches step 5
+//
+// Five NewOrderSingles, one cancel, one replace; two matches. Makers
+// swap sides every cycle, so both sides of the book are worked.
+//
+// WHO TRADES WITH WHOM. A cycle stays on one FIX session (see
+// ExchangeFixFanoutRequester, which distributes whole cycles), so its
+// cancel and replace can reference an order that session actually
+// sent -- a ClOrdID is scoped to its CompID, and referencing another
+// session's would simply be rejected. The consequence is that in a
+// SINGLE-session run a client matches against itself. That is legal
+// here only because self-trade prevention is v2 (docs/spec.md §11);
+// once it lands, this flow has to change with it. On the fleet it is
+// largely moot: every client box quotes the same band on the same
+// symbol, so a taker crosses the best resting maker, which is usually
+// somebody else's.
+//
+// Two earlier shapes were wrong in ways only a run showed -- buys
+// stepping down from the mid and sells stepping up never overlap, so
+// nothing matched; both sides on one band matched a quarter of the
+// flow but still accumulated buys low and sells high, linear in run
+// length. Caught by a loopback run before any fleet time
 // (docs/spec.md §10.1: instrument, do not theorise).
 struct OrderShape {
   std::string symbol = "ABC";
@@ -95,29 +116,52 @@ struct OrderShape {
   std::int64_t quantityLots = 1;
 };
 
-// The side and price of the sequence-th order. A free function so the
-// flow can be replayed through a state machine in a test without a
-// socket.
-struct PlannedOrder {
-  bool buy;
-  std::int64_t priceTicks;
-  bool maker;  // for tests and diagnostics; the wire carries no such field
+// Messages per cycle. A cycle must stay on one session, so the fanout
+// distributes cycles rather than individual messages.
+inline constexpr std::int64_t kCycleLength = 7;
+
+enum class Action : std::uint8_t { NewOrder, Cancel, Replace };
+
+// What the sequence-th message is. A free function taking no socket, so
+// the flow can be replayed through a state machine in a test.
+struct PlannedStep {
+  Action action = Action::NewOrder;
+  bool buy = true;
+  std::int64_t priceTicks = 0;
+  bool maker = true;  // NewOrder only
+  // Cancel and Replace always reference the immediately preceding
+  // message, which is the maker they act on.
+  bool targetsPrevious = false;
 };
 
-inline PlannedOrder plan(const OrderShape& shape, std::int64_t sequence) {
+inline PlannedStep plan(const OrderShape& shape, std::int64_t sequence) {
   const std::int64_t levels = shape.priceLevels < 1 ? 1 : shape.priceLevels;
-  const bool taker = (sequence & 1) != 0;
-  // Roles swap sides every other pair: pairs 0,1 work the bid, 2,3 the
-  // ask, and so on.
-  const bool makerBuys = ((sequence / 2) & 1) == 0;
-  const std::int64_t step = (sequence / 4) % levels;
-  if (!taker) {
-    // Rests inside the band, one tick or more away from the mid.
-    return {makerBuys, makerBuys ? shape.midTicks - 1 - step : shape.midTicks + 1 + step, true};
+  const std::int64_t cycle = sequence / kCycleLength;
+  const std::int64_t step = sequence % kCycleLength;
+  const bool makerBuys = (cycle & 1) == 0;
+  const std::int64_t away = 1 + (cycle % levels);
+  const std::int64_t makerPrice = makerBuys ? shape.midTicks - away : shape.midTicks + away;
+  // A different tick, still inside the band, so the replace really
+  // moves the order and the taker after it still crosses.
+  const std::int64_t replaceAway = 1 + ((cycle + 1) % levels);
+  const std::int64_t replacePrice =
+      makerBuys ? shape.midTicks - replaceAway : shape.midTicks + replaceAway;
+  // Through the whole band on the other side: crosses the best resting
+  // order and, at one lot, exactly one of them.
+  const std::int64_t takerPrice =
+      makerBuys ? shape.midTicks - levels - 1 : shape.midTicks + levels + 1;
+
+  switch (step) {
+    case 1:
+    case 6:
+      return {Action::NewOrder, !makerBuys, takerPrice, false, false};
+    case 3:
+      return {Action::Cancel, makerBuys, makerPrice, false, true};
+    case 5:
+      return {Action::Replace, makerBuys, replacePrice, false, true};
+    default:  // 0, 2, 4
+      return {Action::NewOrder, makerBuys, makerPrice, true, false};
   }
-  // Prices through the whole band on the other side, so it crosses the
-  // best resting order and, at one lot, exactly one of them.
-  return {!makerBuys, makerBuys ? shape.midTicks - levels - 1 : shape.midTicks + levels + 1, false};
 }
 
 // Ticks (hundredths) as an exact decimal string. No floating point.
@@ -137,6 +181,43 @@ inline std::string formatTicks(std::int64_t ticks) {
   }
   return out;
 }
+
+// The application body for one planned step, and the MsgType it goes
+// out under. The session core adds BeginString, BodyLength, CompIDs,
+// MsgSeqNum, SendingTime and CheckSum.
+//
+// A free function so a test can drive the exact bytes this puts on the
+// wire through the real input codec, rather than approximating them:
+// the flow being admissible in principle and the flow encoding to FIX
+// the codec accepts are two different claims.
+inline const char* msgTypeOf(Action action) {
+  switch (action) {
+    case Action::Cancel:
+      return "F";
+    case Action::Replace:
+      return "G";
+    default:
+      return "D";
+  }
+}
+
+inline std::string buildBody(const OrderShape& shape, const PlannedStep& planned, std::int64_t nonce,
+                             std::int64_t target) {
+  const std::string side = planned.buy ? "1" : "2";
+  const std::string common = "\00155=" + shape.symbol + "\00154=" + side + "\00160=20260904-00:00:00\001";
+  switch (planned.action) {
+    case Action::Cancel:
+      return "11=" + std::to_string(nonce) + "\00141=" + std::to_string(target) + common;
+    case Action::Replace:
+      return "11=" + std::to_string(nonce) + "\00141=" + std::to_string(target) + common + "38=" +
+             std::to_string(shape.quantityLots) + "\00140=2\00144=" + formatTicks(planned.priceTicks) +
+             "\001";
+    default:
+      return "11=" + std::to_string(nonce) + common + "38=" + std::to_string(shape.quantityLots) +
+             "\00140=2\00144=" + formatTicks(planned.priceTicks) + "\00159=0\001";
+  }
+}
+
 
 class ExchangeFixRequester : public LoadGeneratorRequester {
  public:
@@ -276,28 +357,29 @@ class ExchangeFixRequester : public LoadGeneratorRequester {
     const std::int64_t nonce = (clientId_ << clientIdShift_) | sequence;
     {
       // Keyed by the ClOrdID that comes back, not by the harness
-      // sequence, for the same reason the counter's sender is: replies
-      // arrive in journal order, which is not request order.
+      // sequence, because replies arrive in journal order, which is not
+      // request order. Every reply -- an accept, a cancel confirmation,
+      // a replace confirmation, or a reject -- echoes the ClOrdID of
+      // the request that caused it, so all three message types
+      // correlate the same way.
       std::lock_guard<std::mutex> lock(pendingMutex_);
       pending_[nonce] = std::move(onDone);
     }
+    const PlannedStep planned = plan(shape_, sequence);
+    // The maker a cancel or replace acts on is the previous message on
+    // this same session -- the fanout distributes whole cycles for
+    // exactly this reason.
+    const std::int64_t target = (clientId_ << clientIdShift_) | (sequence - 1);
     // Built OUTSIDE the lock: a FIX session must assign MsgSeqNum and
     // emit bytes in one order, so sendApplication() has to be
     // serialized, but nothing else does. Formatting the body under the
     // lock made every sender wait on every other sender's string work.
-    const std::string body = buildOrder(nonce, sequence);
+    const std::string body = buildBody(shape_, planned, nonce, target);
+    const char* msgType = msgTypeOf(planned.action);
     {
       std::lock_guard<std::mutex> lock(sendMutex_);
-      session_->sendApplication("D", body);
+      session_->sendApplication(msgType, body);
     }
-  }
-
-  // One NewOrderSingle, per the shape above.
-  std::string buildOrder(std::int64_t nonce, std::int64_t sequence) const {
-    const PlannedOrder p = plan(shape_, sequence);
-    return "11=" + std::to_string(nonce) + "\00155=" + shape_.symbol + "\00154=" + (p.buy ? "1" : "2") +
-           "\00160=20260904-00:00:00\00138=" + std::to_string(shape_.quantityLots) +
-           "\00140=2\00144=" + formatTicks(p.priceTicks) + "\00159=0\001";
   }
 
  private:
@@ -443,11 +525,16 @@ class ExchangeFixFanoutRequester : public LoadGeneratorRequester {
 
   void send(std::int64_t sequence, std::int64_t sendTimeUs,
              std::function<void(bool ok)> onDone) override {
-    // By sequence, not by a shared counter: the harness's sequence is
-    // already monotonic, so this needs no synchronization of its own
-    // and distributes exactly evenly.
+    // By CYCLE, not by message. A cycle's cancel and replace reference
+    // the maker sent immediately before them, and a ClOrdID is scoped
+    // to the CompID that sent it, so splitting a cycle across sessions
+    // would make every cancel and replace reference an order the
+    // receiving session never sent -- all of them rejected, and a
+    // sweep that measured rejects rather than matching. Whole cycles
+    // still distribute evenly, since the harness's sequence is
+    // monotonic.
     const std::size_t which =
-        static_cast<std::size_t>(sequence) % sessions_.size();
+        static_cast<std::size_t>(sequence / kCycleLength) % sessions_.size();
     sessions_[which]->send(sequence, sendTimeUs, std::move(onDone));
   }
 
