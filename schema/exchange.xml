@@ -211,6 +211,7 @@
     <field name="price"         id="11" type="Price"/>
     <field name="quantity"      id="12" type="Qty" description="Order quantity at cancellation"/>
     <field name="cumQty"        id="13" type="Qty"/>
+    <field name="avgPx"         id="14" type="Price"/>
   </sbe:message>
 
   <sbe:message name="OrderCancelRejected" id="105" description="FIX 35=9 434=1">
@@ -238,6 +239,7 @@
     <field name="quantity"      id="11" type="Qty"/>
     <field name="leavesQty"     id="12" type="Qty"/>
     <field name="cumQty"        id="13" type="Qty"/>
+    <field name="avgPx"         id="14" type="Price"/>
   </sbe:message>
 
   <sbe:message name="OrderReplaceRejected" id="107" description="FIX 35=9 434=2">

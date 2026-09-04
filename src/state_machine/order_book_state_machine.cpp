@@ -556,7 +556,8 @@ void OrderBookStateMachine::onCancel(book::Order& o, book::Quantity /*openQty*/)
       .reason(reason)
       .price(static_cast<std::int64_t>(order.px))
       .quantity(static_cast<std::int64_t>(order.qty))
-      .cumQty(static_cast<std::int64_t>(order.cumQty));
+      .cumQty(static_cast<std::int64_t>(order.cumQty))
+      .avgPx(static_cast<std::int64_t>(order.avgPx()));
   stage(slot.data(), wire::encodedLength(out), true);
   done_.push_back(order.id);
 }
@@ -591,7 +592,8 @@ void OrderBookStateMachine::onReplace(book::Order& o, book::Quantity /*newQty*/,
       .price(static_cast<std::int64_t>(order.px))
       .quantity(static_cast<std::int64_t>(order.qty))
       .leavesQty(static_cast<std::int64_t>(order.leavesQty()))
-      .cumQty(static_cast<std::int64_t>(order.cumQty));
+      .cumQty(static_cast<std::int64_t>(order.cumQty))
+      .avgPx(static_cast<std::int64_t>(order.avgPx()));
   stage(slot.data(), wire::encodedLength(out), true);
 }
 

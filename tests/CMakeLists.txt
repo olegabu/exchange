@@ -30,3 +30,21 @@ add_executable(exchange_snapshot_test snapshot_test.cpp)
 target_link_libraries(exchange_snapshot_test PRIVATE
   exchange::state_machine GTest::gtest GTest::gtest_main sequencer::common)
 gtest_discover_tests(exchange_snapshot_test PROPERTIES TIMEOUT 300)
+
+# Step 5: the FIX codecs, and the whole thing as real processes (spec §7).
+add_executable(exchange_fix_codec_test fix_codec_test.cpp)
+target_link_libraries(exchange_fix_codec_test PRIVATE
+  exchange::fix_input_codec exchange::fix_output_codec exchange::state_machine
+  GTest::gtest GTest::gtest_main)
+gtest_discover_tests(exchange_fix_codec_test)
+
+add_executable(exchange_fix_end_to_end_test fix_end_to_end_test.cpp)
+target_link_libraries(exchange_fix_end_to_end_test PRIVATE
+  sequencer::fix_session GTest::gtest GTest::gtest_main Threads::Threads sequencer::common)
+target_compile_definitions(exchange_fix_end_to_end_test PRIVATE
+  EXCHANGE_NODE_PATH="$<TARGET_FILE:exchange_node_main>"
+  EXCHANGE_FIX_GATEWAY_PATH="$<TARGET_FILE:exchange_fix_gateway_main>"
+  EXCHANGE_ADMIN_PATH="$<TARGET_FILE:exchange_admin_main>"
+)
+add_dependencies(exchange_fix_end_to_end_test exchange_node_main exchange_fix_gateway_main exchange_admin_main)
+gtest_discover_tests(exchange_fix_end_to_end_test PROPERTIES TIMEOUT 180)

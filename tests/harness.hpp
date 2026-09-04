@@ -157,7 +157,7 @@ struct Out {
   std::uint64_t orderId = 0;
   std::uint32_t instrumentId = 0;
   Side::Value side = Side::NULL_VALUE;
-  std::int64_t price = 0, quantity = 0, cumQty = 0, leavesQty = 0;
+  std::int64_t price = 0, quantity = 0, cumQty = 0, leavesQty = 0, avgPx = 0;
   std::uint8_t reason = 0;  // RejectReason or CancelReason, raw
   std::vector<Exec> fills;
   std::vector<std::byte> raw;
@@ -246,6 +246,7 @@ inline Out decodeOutput(sequencer::Payload bytes) {
       o.price = m->price();
       o.quantity = m->quantity();
       o.cumQty = m->cumQty();
+      o.avgPx = m->avgPx();
       break;
     }
     case OrderCancelRejected::sbeTemplateId(): {
@@ -271,6 +272,7 @@ inline Out decodeOutput(sequencer::Payload bytes) {
       o.quantity = m->quantity();
       o.leavesQty = m->leavesQty();
       o.cumQty = m->cumQty();
+      o.avgPx = m->avgPx();
       break;
     }
     case OrderReplaceRejected::sbeTemplateId(): {

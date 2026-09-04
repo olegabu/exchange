@@ -138,6 +138,18 @@ Paths are relative to `../sequencer`.
   reconnect drill asserting the correct behaviour, `GTEST_SKIP`ped with
   a pointer here until the fix lands in `sequencer/gateway/fix` as its
   own change.
+- **sequencer FIX gateway, resends carry no `OrigSendingTime`.** FIX
+  4.4 requires tag 122 on a `PossDup` retransmission.
+  `SentRecord::sendingTime` is declared
+  (`gateway/fix/output/include/sequencer/fix/fix_output_transport.hpp:53`)
+  and passed to the session core when a resend is served
+  (`fix_output_transport.cpp:99`), but **nothing ever assigns it**, so
+  every resend goes out flagged `PossDup` with the field absent. Bodies
+  and `MsgSeqNum` are correct, so the resend is otherwise faithful; a
+  strict client engine may still reject it.
+  `tests/fix_end_to_end_test.cpp` asserts the correct behaviour and
+  `GTEST_SKIP`s while the gap stands. A one-line fix in
+  `sequencer/gateway/fix`, as its own change.
 - **`FixRequester` has no payload hook** (`fix_requester.hpp:228-237`);
   the exchange load generator forks it. Upstream generalisation
   (virtual body builder, configurable MsgType) is a sequencer follow-up.
@@ -228,4 +240,16 @@ numbers live in `measurements.md`.
   makes this true). Exact `cumNotional` travels as 128 bits so a
   restored replica computes the same `avgPx` on the next fill.
   `snapshotSave` at 100k resting orders measured in `measurements.md`.
+- Build step 5: the FIX codecs are one library per direction (the
+  chassis gflag collision, §2). The input codec rejects anything it
+  cannot encode as a session-level Reject rather than proposing it, so
+  a malformed order never reaches the journal. The output codec is a
+  pure function of the record — asserted by encoding the same record
+  twice and comparing bytes, which is what a `ResendRequest` relies on.
+  `--inline_designated_outputs` is deliberately not offered by
+  `exchange_fix_gateway` (§3). Instrument static data enters through
+  `exchange_admin`, which proposes over brpc and prints the state
+  machine's designated answer. Two more sequencer gateway gaps found by
+  measurement and recorded above: catch-up addressing, and the missing
+  `OrigSendingTime` on resends.
 

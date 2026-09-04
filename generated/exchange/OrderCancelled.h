@@ -118,7 +118,7 @@ private:
     }
 
 public:
-    static constexpr std::uint16_t SBE_BLOCK_LENGTH = static_cast<std::uint16_t>(126);
+    static constexpr std::uint16_t SBE_BLOCK_LENGTH = static_cast<std::uint16_t>(134);
     static constexpr std::uint16_t SBE_TEMPLATE_ID = static_cast<std::uint16_t>(104);
     static constexpr std::uint16_t SBE_SCHEMA_ID = static_cast<std::uint16_t>(1);
     static constexpr std::uint16_t SBE_SCHEMA_VERSION = static_cast<std::uint16_t>(0);
@@ -176,7 +176,7 @@ public:
 
     SBE_NODISCARD static SBE_CONSTEXPR std::uint16_t sbeBlockLength() SBE_NOEXCEPT
     {
-        return static_cast<std::uint16_t>(126);
+        return static_cast<std::uint16_t>(134);
     }
 
     SBE_NODISCARD static SBE_CONSTEXPR std::uint64_t sbeBlockAndHeaderLength() SBE_NOEXCEPT
@@ -2030,6 +2030,69 @@ public:
         return *this;
     }
 
+    SBE_NODISCARD static const char *avgPxMetaAttribute(const MetaAttribute metaAttribute) SBE_NOEXCEPT
+    {
+        switch (metaAttribute)
+        {
+            case MetaAttribute::PRESENCE: return "required";
+            default: return "";
+        }
+    }
+
+    static SBE_CONSTEXPR std::uint16_t avgPxId() SBE_NOEXCEPT
+    {
+        return 14;
+    }
+
+    SBE_NODISCARD static SBE_CONSTEXPR std::uint64_t avgPxSinceVersion() SBE_NOEXCEPT
+    {
+        return 0;
+    }
+
+    SBE_NODISCARD bool avgPxInActingVersion() SBE_NOEXCEPT
+    {
+        return true;
+    }
+
+    SBE_NODISCARD static SBE_CONSTEXPR std::size_t avgPxEncodingOffset() SBE_NOEXCEPT
+    {
+        return 126;
+    }
+
+    static SBE_CONSTEXPR std::int64_t avgPxNullValue() SBE_NOEXCEPT
+    {
+        return SBE_NULLVALUE_INT64;
+    }
+
+    static SBE_CONSTEXPR std::int64_t avgPxMinValue() SBE_NOEXCEPT
+    {
+        return INT64_C(-9223372036854775807);
+    }
+
+    static SBE_CONSTEXPR std::int64_t avgPxMaxValue() SBE_NOEXCEPT
+    {
+        return INT64_C(9223372036854775807);
+    }
+
+    static SBE_CONSTEXPR std::size_t avgPxEncodingLength() SBE_NOEXCEPT
+    {
+        return 8;
+    }
+
+    SBE_NODISCARD std::int64_t avgPx() const SBE_NOEXCEPT
+    {
+        std::int64_t val;
+        std::memcpy(&val, m_buffer + m_offset + 126, sizeof(std::int64_t));
+        return SBE_LITTLE_ENDIAN_ENCODE_64(val);
+    }
+
+    OrderCancelled &avgPx(const std::int64_t value) SBE_NOEXCEPT
+    {
+        std::int64_t val = SBE_LITTLE_ENDIAN_ENCODE_64(value);
+        std::memcpy(m_buffer + m_offset + 126, &val, sizeof(std::int64_t));
+        return *this;
+    }
+
 template<typename CharT, typename Traits>
 friend std::basic_ostream<CharT, Traits> & operator << (
     std::basic_ostream<CharT, Traits> &builder, const OrderCancelled &_writer)
@@ -2102,6 +2165,10 @@ friend std::basic_ostream<CharT, Traits> & operator << (
     builder << ", ";
     builder << R"("cumQty": )";
     builder << +writer.cumQty();
+
+    builder << ", ";
+    builder << R"("avgPx": )";
+    builder << +writer.avgPx();
 
     builder << '}';
 
