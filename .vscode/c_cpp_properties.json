@@ -1,0 +1,48 @@
+{
+  "version": 4,
+  "configurations": [
+    {
+      "name": "exchange (compile_commands)",
+      "//": [
+        "The include paths come from compile_commands.json, which CMake",
+        "writes because the root CMakeLists sets CMAKE_EXPORT_COMPILE_COMMANDS.",
+        "That is the compiler's own view -- the generated SBE headers, the",
+        "vendored liquibook, sequencer's sibling includes and vcpkg's tree",
+        "all resolve exactly as they do in a build, and they cannot drift",
+        "from it. Configure once (make configure) and the database exists.",
+        "includePath below is only a fallback for files the database does",
+        "not mention: headers opened before a configure, and anything under",
+        "tests/ or bench/ that is header-only."
+      ],
+      "compileCommands": "${workspaceFolder}/build/debug/compile_commands.json",
+      "compilerPath": "/usr/bin/g++-10",
+      "cStandard": "c17",
+      "cppStandard": "c++20",
+      "intelliSenseMode": "linux-gcc-x64",
+      "includePath": [
+        "${workspaceFolder}/src",
+        "${workspaceFolder}/tests",
+        "${workspaceFolder}/bench",
+        "${workspaceFolder}/generated",
+        "${workspaceFolder}/vendor/liquibook/src",
+        "${workspaceFolder}/build/debug/vcpkg_installed/x64-linux/include",
+        "${workspaceFolder}/build/debug/sequencer/node/generated",
+        "${workspaceFolder}/../sequencer/common/include",
+        "${workspaceFolder}/../sequencer/journal/include",
+        "${workspaceFolder}/../sequencer/node/include",
+        "${workspaceFolder}/../sequencer/node/src",
+        "${workspaceFolder}/../sequencer/gateway/input/include",
+        "${workspaceFolder}/../sequencer/gateway/output/include",
+        "${workspaceFolder}/../sequencer/gateway/fix/include",
+        "${workspaceFolder}/../sequencer/gateway/fix/session/include",
+        "${workspaceFolder}/../sequencer/gateway/fix/input/include",
+        "${workspaceFolder}/../sequencer/gateway/fix/output/include",
+        "${workspaceFolder}/../sequencer/tools/replay/include",
+        "${workspaceFolder}/../sequencer/tools/replay/src",
+        "${workspaceFolder}/../sequencer/bench/load_generator/include",
+        "${workspaceFolder}/../sequencer/sdk/cpp/include"
+      ],
+      "defines": []
+    }
+  ]
+}

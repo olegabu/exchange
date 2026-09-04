@@ -1,0 +1,19 @@
+{
+  "// build tree": [
+    "The debug preset is what IntelliSense reads (build/debug/compile_commands.json).",
+    "Run `make configure` once after cloning, or after adding a source file,",
+    "so the database exists and is current."
+  ],
+  "cmake.buildDirectory": "${workspaceFolder}/build/debug",
+  "cmake.configureOnOpen": false,
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/debug/compile_commands.json",
+  "files.associations": {
+    "*.hpp": "cpp",
+    "*.h": "cpp"
+  },
+  "search.exclude": {
+    "build": true,
+    "generated": true
+  },
+  "// generated": "generated/ is checked-in SBE output (make regenerate); excluded from search so it does not drown results, but NOT hidden -- it is what compiles."
+}
