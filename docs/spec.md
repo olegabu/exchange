@@ -179,10 +179,36 @@ Rules the schema must obey, all consequences of §4.1:
   binary still replay under a new one — and §8.3 requires exactly that:
   restart from any sequence number, identical output.
 
-**The journal is permanent.** A schema mistake is not a deploy
-problem, it is a "every record ever written now decodes wrongly"
-problem. This is the single highest-consequence design decision in the
-project and deserves review before a line of matching code is written.
+**Why SBE, and what is actually specific to it.**
+
+Permanence is a property of the JOURNAL, not of SBE. Any encoding put
+in front of it -- protobuf, flatbuffers, hand-rolled structs --
+inherits the same "every record ever written must still decode"
+constraint, because §8.3 requires replay from any sequence number to
+produce identical output. That is settled by `sequencer`'s design and
+is not a choice this project gets to make.
+
+SBE is chosen for what it is good at, and it is a good fit here:
+records are compact, and decoding is a cast over the buffer rather
+than a parse into new objects. That matters on the apply path
+specifically, where §4.1 asks for bounded allocation and the latency
+budget is measured in microseconds -- a format that allocates per
+record would be paying for it once per order, forever.
+
+What IS specific to SBE is how a schema may CHANGE. Fields are located
+by computed offset, not by tag, so:
+
+- fields may be appended, never reordered, never removed;
+- a field's type and width are frozen once written;
+- readers resolve layout from the schema version in the header, so
+  every version ever written must remain describable.
+
+A tag-based format tolerates reordering and removal; SBE does not.
+So the cost of getting the initial field layout wrong is higher than
+it would be with protobuf -- not because the journal is permanent
+(it would be either way), but because SBE gives fewer ways to walk a
+layout mistake back. Review the layout before step 3; adding a field
+later is free, moving one is not.
 
 ---
 
@@ -273,7 +299,7 @@ redesigned here:
 ```
 exchange/
   docs/spec.md                 this document
-  schema/exchange.xml          the SBE schema — the most permanent artifact here
+  schema/exchange.xml          the SBE schema; append-only once written
   generated/                   checked-in SBE output, refreshed by `make regenerate`
   src/
     order_book_state_machine.{hpp,cpp}
@@ -300,7 +326,8 @@ a later one being right.
    `add_subdirectory` onto sequencer, get an empty `StateMachine` that
    compiles and runs a node. Nothing matches yet.
 2. **Schema.** `exchange.xml`, generation, checked-in headers, CI diff.
-   Review it hard here; it is the permanent artifact.
+   Review the field LAYOUT here: appending a field later is free,
+   moving or removing one is not (§4).
 3. **Matching.** `OrderBookStateMachine` over liquibook, with the
    determinism review of §5 done as it is written, plus the
    differential test.
