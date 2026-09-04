@@ -126,7 +126,29 @@ The checked-in copy is what compiles; the diff is what keeps it honest.
 
 **Decision:** sibling checkout plus `add_subdirectory`, with
 `SEQUENCER_DIR` overridable — exactly the arrangement `raft-tests`
-already uses. Adding install/export rules to `sequencer` is the
+already uses.
+
+The three repositories live together under `total-order/`:
+
+```
+total-order/
+  sequencer/     the platform
+  raft-tests/    its benchmark harness
+  exchange/      this, an application built on it
+```
+
+They are siblings by requirement, not by convenience: `raft-tests`
+resolves `SEQUENCER_DIR ?= ../../sequencer` and this repo will
+`add_subdirectory` the same checkout. Grouping them cost one directory
+and no edits -- the relative path was already correct and stayed
+correct.
+
+Symlinks at the old `~/workspace/{sequencer,raft-tests,exchange}`
+paths point at the new locations. They exist so that the 53GB CMake
+build trees, which record absolute paths in `CMakeCache.txt`, survived
+the move without a full rebuild. They are a transition aid: once no
+tooling refers to the old paths, delete them and reconfigure the build
+trees once. Adding install/export rules to `sequencer` is the
 cleaner long-run answer and is a change to *that* repo, not this one;
 not required for v1.
 
