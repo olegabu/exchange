@@ -343,4 +343,13 @@ numbers live in `measurements.md`.
 - The ladder is now run with `MAX_INFLIGHT` raised: the harness's
   default in-flight cap, not the exchange, produced every drop below
   the ceiling. Zero drops through 150k once raised.
+- Retracted: 250k/375k/500k figures produced by hand-launching load
+  generators sequentially and summing their rates. Twenty ssh launches
+  take longer than the run, so the generators never overlapped; run
+  concurrently the same configuration does ~108k. A rate summed across
+  independently-timed clients is not a rate, and `sweep-gen.sh` now
+  warns when generator start times are spread (`measurements.md` §3).
+- Disk and network are ruled out at the ceiling: 24% disk utilisation
+  and under 6% of the network link, with CPU 64% idle. The ceiling is a
+  blocking path, not a saturated resource.
 

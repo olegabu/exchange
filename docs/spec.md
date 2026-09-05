@@ -423,6 +423,8 @@ exchange/
     wire/                      SBE header helpers
     oms/ marketdata/           v2 (§0)
     perps/                     v3 (§0)
+  tools/
+    journal_stats_main.cpp     what a journal actually contains (§9.2)
   bench/
     apply_benchmark.cpp        google benchmark over apply() and the snapshot paths (§9.1)
   tests/
@@ -495,6 +497,37 @@ Numbers, and the explanation of every difference from the interface
 reference, go to `measurements.md`.
 
 ---
+
+### 9.2 Asking the journal what actually happened
+
+`exchange_journal_stats --data_dir=<node data dir>` replays a journal
+through a fresh state machine — the same path `exchange_replay` uses —
+and reports what went in, what came out, and the book at the end:
+
+```
+records            2000000 of 25000021
+inputs:   NewOrder 1428571   CancelOrder 285714   ReplaceOrder 285714
+outputs:  OrderAccepted 1428571   Fill 571425   OrderCancelRejected 51944
+          (Fill entries) 1142850  -> 571425 matches
+book at the end:  live orders 51947   instruments 1
+```
+
+`--replay_through=N` bounds it, since replaying tens of millions of
+records takes minutes.
+
+**It exists because nothing else could answer "is this measurement
+measuring what I think".** A load generator reports its own throughput
+and latency and nothing about what the exchange did with the traffic:
+a run where every order is rejected looks *fast*. This tool is what
+established that the flow matched at the designed rate, that the book
+was bounded (and later, that it was not), and that a suspiciously good
+result was real work rather than a stream of rejects.
+
+It also corrected a wrong inference. Node RSS climbing during a run
+was read as the book growing; the tool showed the book bounded at 3,830
+orders, and the memory was the node mmapping its own journal. **Reach
+for it before drawing conclusions from process metrics** — §10.1's
+lesson, in the one place this repository keeps tripping over it.
 
 ## 10. What this project must not relearn
 

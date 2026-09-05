@@ -285,15 +285,51 @@ shown to fail without the fix. It does **not** fix the reconnect gap
 Fixing it did not change the two-gateway throughput, so the collision
 was a correctness bug, not the cause of the shortfall.
 
+### A retraction: 250k / 375k / 500k were not real
+
+While testing whether the rig was the ceiling, I launched 20 load
+generators by hand, one ssh at a time, and summed their reported
+achieved rates to 250,000, then 375,000, then 499,810/s at
+sub-millisecond p50 — apparently beating sequencer's own counter.
+
+**That was an artifact and those numbers are withdrawn.** Twenty
+sequential ssh launches take 60–100 s against a 55 s run, so the first
+generator finished before the last one started. Each measured a
+lightly-loaded cluster on its own, and summing rates that were never
+concurrent produces a total that was never offered.
+
+Run properly — all 20 launched in parallel, log timestamps confirming
+they started within one second of each other — the same configuration
+achieves **107,569/s with 17M drops and a 333 ms p50**. That is
+consistent with every parallel measurement here, and with the ~123k
+ceiling the single-generator ladders showed.
+
+`sweep-gen.sh` now checks the spread of generator start times and warns
+when a row is not a concurrent measurement, so this cannot recur
+silently.
+
+The lesson generalises past this bug: **a rate summed across
+independently-timed clients is not a rate.** The existing
+`sweep-multi.sh` avoids it by launching in parallel and waiting on all
+of them before reading any result; my hand-rolled loop did not, and the
+number it produced was flattering enough that only its implausibility
+gave it away.
+
 ### Still open
 
-- **What the ~123k ceiling is.** Not the gateway (a second one does not
-  raise it), not the state machine (1 µs with a wide book), not the
-  output codec (307k), not the input path (343k). It is shared, and the
-  next suspects are the journal write path and braft: this application
-  writes 288 B per record against the counter's 16 B, so at 123k it is
-  moving ~35 MB/s of journal against the counter's 6.4 MB/s at 400k.
-  Measuring disk and network throughput at the ceiling is the next step.
+- **What the ~110–125k ceiling is — still open, but no longer disk or
+  network.** Measured on the leader at the ceiling: disk 52.7 MB/s,
+  263 IOPS, **24% utilisation** (of a gp3 volume rated 125 MB/s and
+  3,000 IOPS, `w_await` 3.7 ms); network **rx 20.5 MB/s, tx 57.8 MB/s**
+  against a link of roughly 1,560 MB/s; CPU 64% idle. None of them is
+  close to saturation.
+  Also not the gateway (a second one does not raise the ceiling), not
+  the state machine (1 µs with a wide book), not the output codec
+  (307k), not the input path (343k). Everything measured has headroom
+  and yet the rate is capped, which is the signature of a *blocking*
+  path rather than a saturated resource. The untested surface left is
+  the propose→commit round trip inside braft and the handoff between
+  the gateway's session threads and the ring.
 - **The bimodal p99**, and why two gateways lose more replies than one.
 
 ## 4. Fleet p50 at 100k — superseded
