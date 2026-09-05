@@ -358,10 +358,27 @@ numbers live in `measurements.md`.
   the number of sessions rather than by run length — 6 live orders per
   1.5M records, against 52,000 with the previous shape. Cancel-rejects
   (~23% of messages) are the mechanism, not a fault.
-- p99 departs from p50 at 50k and above. Measured NOT to be the state
-  machine, fills, segment rollover, the journal tail, the output codec,
-  or the node at all — braft reports propose-to-apply p99 of 630 µs and
-  a 2.2 ms maximum. The remaining hypothesis is head-of-line blocking
-  in the gateway's single ring-reader delivery thread
-  (`measurements.md` §3).
+- **The p99 departure at 50k is journal segment rollover, and it is a
+  tuning property, not a floor.** It is not the state machine and not
+  fills: braft reports propose-to-apply p99 of 630 µs and a 2.2 ms
+  maximum, and no apply exceeded 20 ms. The per-second latency lines
+  showed all generators spiking together at seconds 44 and 65 — a
+  global event, **21 s apart**, which is exactly how long 1,048,576
+  records take to accumulate at 50,000/s. Quartering
+  `--journal_records_per_segment`, one variable, same fleet, back to
+  back, took p99 from **320 ms to 5.3 ms** with p50 unmoved, and the
+  full ladder to 75k now holds p99 under 1.7 ms with zero drops. The
+  cost scales because a segment file is
+  `records_per_segment × maxRecordBytes` (256 GiB sparse by default)
+  plus a `records_per_segment × 16 B` index (16 MiB) built at every
+  rollover. Fleet runs set the flag; upstream, the next segment should
+  be prepared on a background thread so a rollover is never on the
+  write path (`measurements.md` §3).
+- Two earlier claims here were wrong and are retracted: that segment
+  rollover was ruled out (the `SEQ_SEGMENT_OPEN_US` probe watches the
+  *reader* opening a segment, not the *writer* creating one — a probe
+  that fires correctly on the wrong side of the thing it names), and
+  that head-of-line blocking in the gateway's ring-reader thread was
+  the likely cause. The interval predicted the result; the hypothesis
+  predicted nothing.
 

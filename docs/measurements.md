@@ -343,7 +343,11 @@ fault: a maker filled before its own cancel arrived. Every maker leaves
 the book on one path or the other, so depth is bounded by the number of
 sessions rather than the length of the run.
 
-### Why p99 departs at 50k, and what it is not
+### Why p99 departs at 50k: journal segment rollover
+
+**It is not the book, and not fills.** It is the journal creating its
+next segment. Establishing that took a prediction and a control, not
+more reading.
 
 p50 stays near 1 ms while p99 jumps to ~230 ms from 50k up. The shape
 says what kind of thing it is: at 50,000/s over 30 s that is 1.5M
@@ -353,29 +357,147 @@ rate catches ~15,000 in flight, so one or two brief stalls per run
 reproduce the number exactly. At 25k a 30 s window usually contains
 none, which is why p99 is clean there.
 
-Ruled out by direct measurement, with every probe verified in
-`/proc/<pid>/environ` first:
+The per-second latency lines located them. In a 76 s run at 50k every
+generator was flat at ~900 µs except at **second 44 and second 65**,
+where all of them spiked together (95–240 ms). Two facts follow: the
+event is **global**, not per-session or per-client — and the two are
+**21 seconds apart**.
+
+That interval is the whole answer. The journal default is 1,048,576
+records per segment, and at 50,000 records/s a segment fills in
+**20.97 s**. The stalls are segment rollovers.
+
+**The control.** Predict, then change one variable: quarter the segment
+and the rollovers should change with it. Same fleet, same binaries,
+back to back, `--journal_records_per_segment` the only difference:
+
+| journal segment | p50 | p99 | per-second stalls in a 45 s run |
+|---|---|---|---|
+| 262,144 records | 1,048 µs | **5,324 µs** | none — the worst second of all five hosts was 990 µs |
+| 1,048,576 (default) | 1,053 µs | **320,256 µs** | second 44 on **every** host: 322 / 394 / 393 / 341 / 324 ms |
+
+A 60× difference in p99 from one flag, with p50 unmoved. The stalls did
+not merely become more frequent as predicted — they disappeared, which
+says the cost is not a fixed price per rollover but scales with how big
+the segment is.
+
+**Why it scales — and what is *not* yet established.** The segment
+files on the leader show the geometry:
+
+```
+274877906944  journal_00000000000000000001_00000000000001048576.data   # 256 GiB, sparse
+    16777240  journal_00000000000000000001_00000000000001048576.index
+```
+
+`writer.hpp:329` confirms the formula rather than leaving it to
+arithmetic: a segment's data file is reserved at
+`recordsPerSegment × maxRecordBytes` = 1,048,576 × 256 KiB =
+**256 GiB** sparse (`ftruncate` then `mmap`, `mapped_file.hpp:42,118`),
+and its index at `recordsPerSegment × 16 B` = **16 MiB**. Both quarter
+when the record count quarters.
+
+The stall is a **blocking wait**, not inline file creation. Sequencer
+already moved this work off the apply thread:
+
+- `writer.hpp:173` — preparation of the next segment starts at
+  `kPrepareAtPercent = 90`, handed to a worker thread.
+- `writer.hpp:264-276` — `roll()` takes `workMutex_` and **waits on
+  `workCv_`** until that segment is ready. Its own comment calls the
+  wait "the fallback for a burst that outruns it".
+- `writer.hpp:288-294` — the filled segment is handed to **the same
+  worker** to be flushed and then renamed.
+
+So one worker thread owns both jobs, and the apply thread blocks on it
+at every boundary. Both jobs scale with segment size, and so does the
+lead time: the 90%→100% window is 10% of a segment, which at 50k is
+**2.1 s** at the default and **0.52 s** at a quarter. Which of the two
+jobs the worker was actually behind on — flushing ~300 MB of the sealed
+segment, or reserving the next one — **is not established here**. There
+is no probe on the roll wait (`SEQ_APPLY_STALL_US`,
+`SEQ_SEGMENT_OPEN_US` and `SEQ_TAIL_STALL_US` are the only three), and
+adding one is what would settle it. What is established is the
+dependence on segment size and the size of the effect.
+
+**The upstream tuning advice is stale.** `writer.hpp:255` records the
+opposite conclusion from an earlier round: "raising the segment size
+16x — making the roll 16x rarer — took p999 to 3-5ms and p99 from
+17-60ms to ~2ms". That held when the roll ran **inline on the apply
+thread**, where rarer was strictly better. Now that the work is off the
+thread and only the wait remains, bigger segments make each wait longer
+while the preparation window grows no faster than the work in it — and
+the measurement here runs the other way. The comment should be read as
+history, not as current guidance.
+
+Ruled out first, by direct measurement, with every probe verified in
+`/proc/<pid>/environ`:
 
 | suspect | probe | result |
 |---|---|---|
 | The state machine / fills | `SEQ_APPLY_STALL_US=20000` | **no apply exceeded 20 ms** in a 40 s run at 50k |
-| Journal segment rollover | `SEQ_SEGMENT_OPEN_US=1000` | **zero** segment opens over 1 ms |
 | Journal tail and output codec | `SEQ_TAIL_STALL_US=20000` | **no tail stall** over 20 ms |
 | The node: propose → commit → apply | braft's own `node_propose_batch_apply_wait_us` | p50 492 µs, **p99 630 µs**, max 2,206 µs |
+| Warm-up contaminating the histogram | read `record()` in `load_generator.hpp`; ran a 30 s warm-up | already excluded (`measuring_` gates the histogram); p99 unchanged |
 
-So the answer to "is it the book, or fills taking longer" is **no**: the
-whole node-side path, matching included, is tight to a 2.2 ms maximum.
-The 230 ms tail happens entirely outside the node.
+So the answer to "is it the book, or fills taking longer" is **no**:
+matching included, the node-side path is tight to a 2.2 ms maximum.
 
-What is left is the gateway's session I/O and the client. The strongest
-remaining hypothesis, untested: `FixOutputTransport` delivers to every
-session from **one ring-reader thread**, so a single session whose
-socket blocks — a client slow to read, a full TCP window — stalls
-delivery for all of them. That is consistent with everything measured:
-nothing CPU-saturated, the node clean, and a second gateway (halving
-the sessions per delivery thread) markedly improving the tail at high
-rates. Testing it needs a probe around the send path, or a run with one
-deliberately slow client.
+**A probe that lied by omission.** `SEQ_SEGMENT_OPEN_US=1000` reported
+**zero** segment opens over 1 ms, and that silence was read as
+"rollover is not it". It is a probe on the *reader* opening a segment
+to read; the cost is on the *writer* creating one. §10.2 says prove a
+probe fires before trusting its silence — this is the sharper version:
+a probe can fire correctly and still be measuring the wrong side of the
+thing it appears to name.
+
+**Consequences.**
+
+- The exchange's fleet runs default `JOURNAL_RECORDS_PER_SEGMENT` to
+  262,144 rather than taking the journal's default;
+  `raft-tests/exchange/Makefile` carries the flag and the reasoning.
+  **This trades nothing.** The index is 16 bytes per record whatever
+  the segment size, so the total work is identical; the segment size
+  only decides whether it arrives as one 16 MiB burst every 21 s or as
+  four 4 MiB ones. Smaller is strictly better here.
+- The tail is a **tuning** property, not a floor: p99 at 50k is 5.3 ms,
+  not 230 ms.
+- Upstream, this is worth fixing rather than tuning around: the next
+  segment and its index can be created ahead of the boundary on a
+  background thread, so no rollover is ever on the write path. To be
+  filed against `sequencer`.
+- The earlier hypothesis recorded here — a single ring-reader thread in
+  `FixOutputTransport` stalled by one slow session — was **wrong**. It
+  fitted the evidence available and predicted nothing that came true;
+  the interval did.
+
+### The ladder with the segment fix (2026-09-05)
+
+20 sessions, 4 generators on each of 5 client boxes, two FIX gateways
+on the leader, bounded maker/replace/taker/cancel flow, 500 price
+levels, `--journal_records_per_segment=262144`, 5 s warm-up + 45 s
+measured per rate.
+
+| offered | achieved | p50 | p90 | p99 | p99.9 | max | dropped |
+|---|---|---|---|---|---|---|---|
+| 10,000 | 10,000 | 745 µs | 857 µs | 1,044 µs | 2,128 µs | 3,626 µs | 0 |
+| 25,000 | 25,000 | 793 µs | 913 µs | 1,059 µs | 1,543 µs | 3,782 µs | 0 |
+| 50,000 | 49,995 | 884 µs | 1,044 µs | 1,339 µs | 2,066 µs | 5,448 µs | 0 |
+| 75,000 | 74,980 | 987 µs | 1,229 µs | 1,685 µs | 2,766 µs | 6,736 µs | 0 |
+| 100,000 | 99,980 | **1,111 µs** | 1,464 µs | **2,112 µs** | 3,268 µs | 7,376 µs | 0 |
+
+Every rate delivered in full, zero drops, and **not one per-second
+sample above 4 ms at any rate** — where the same ladder on the default
+geometry produced 320 ms p99 and second-long stalls visible on every
+host at once.
+
+Against the §9.1 target of **p50 1 ms at 100k**: 1.111 ms, with p99 at
+2.1 ms. The tail is no longer the thing standing between this and the
+target; the remaining 111 µs is.
+
+The p99 curve is now flat in the rate — 1.0 ms at 10k to 2.1 ms at
+100k — which is what a system with no periodic stall looks like. The
+"p99 departs at 50k" shape in the previous ladder was entirely the
+rollover, and it departed at 50k only because that is the rate at which
+a 45 s window first contains a segment boundary.
 
 ### Still open
 
@@ -392,7 +514,8 @@ deliberately slow client.
   path rather than a saturated resource. The untested surface left is
   the propose→commit round trip inside braft and the handoff between
   the gateway's session threads and the ring.
-- **The bimodal p99**, and why two gateways lose more replies than one.
+- Why two gateways lose more replies than one. (The bimodal p99 itself
+  is answered above: journal segment rollover.)
 
 ## 4. Fleet p50 at 100k — superseded
 
