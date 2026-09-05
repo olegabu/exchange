@@ -469,35 +469,181 @@ thing it appears to name.
   fitted the evidence available and predicted nothing that came true;
   the interval did.
 
-### The ladder with the segment fix (2026-09-05)
+### The ladder with the segment fix — superseded
 
-20 sessions, 4 generators on each of 5 client boxes, two FIX gateways
-on the leader, bounded maker/replace/taker/cancel flow, 500 price
-levels, `--journal_records_per_segment=262144`, 5 s warm-up + 45 s
-measured per rate.
+A first confirmation ladder to 100k was run immediately after the fix
+and reproduced closely (10k: 745 vs 725 µs; 100k: p50 1,111 vs 1,103,
+p99 2,112 vs 2,140). It is superseded by the full sweep below, which
+covers the same rates and continues to 500k. The agreement between the
+two runs is itself worth recording: the ladder is reproducible to
+within a few percent across a fleet stop/start.
 
-| offered | achieved | p50 | p90 | p99 | p99.9 | max | dropped |
+### The full ladder to 500k (2026-09-05)
+
+The complete sweep on the fixed geometry. Every number below came from
+the run configuration recorded in §3.1; nothing is carried over from an
+earlier ladder.
+
+| offered | achieved | p50 | p90 | p99 | p99.9 | max | rig drops |
 |---|---|---|---|---|---|---|---|
-| 10,000 | 10,000 | 745 µs | 857 µs | 1,044 µs | 2,128 µs | 3,626 µs | 0 |
-| 25,000 | 25,000 | 793 µs | 913 µs | 1,059 µs | 1,543 µs | 3,782 µs | 0 |
-| 50,000 | 49,995 | 884 µs | 1,044 µs | 1,339 µs | 2,066 µs | 5,448 µs | 0 |
-| 75,000 | 74,980 | 987 µs | 1,229 µs | 1,685 µs | 2,766 µs | 6,736 µs | 0 |
-| 100,000 | 99,980 | **1,111 µs** | 1,464 µs | **2,112 µs** | 3,268 µs | 7,376 µs | 0 |
+| 10,000 | 10,000 | 725 µs | 833 µs | 928 µs | 1,072 µs | 3,832 µs | 0 |
+| 25,000 | 25,000 | 750 µs | 854 µs | 976 µs | 1,463 µs | 4,504 µs | 0 |
+| 50,000 | 49,994 | 864 µs | 1,028 µs | 1,349 µs | 2,012 µs | 5,448 µs | 0 |
+| 75,000 | 74,980 | 982 µs | 1,236 µs | 1,697 µs | 2,870 µs | 6,984 µs | 0 |
+| 100,000 | 99,980 | 1,103 µs | 1,466 µs | 2,140 µs | 3,226 µs | 7,660 µs | 0 |
+| 125,000 | 124,980 | 1,237 µs | 1,779 µs | 2,914 µs | 4,788 µs | 9,736 µs | 0 |
+| **150,000** | **149,980** | **1,405 µs** | 2,150 µs | **4,456 µs** | 20,528 µs | 38,592 µs | **0** |
+| 200,000 | 162,651 | 1,961 µs | 5,264 µs | 30,720 µs | 146,304 µs | 313,600 µs | 0 |
+| 250,000 | 194,054 | 3,638 µs | 28,736 µs | 129,344 µs | 200,320 µs | 298,752 µs | 0 |
+| 300,000 | 224,712 | 40,512 µs | 486,144 µs | 1,080,320 µs | 1,146,880 µs | 1,216,512 µs | 200,548 |
+| 400,000 | 194,995 | 3,186,688 µs | — | — | — | 4,849,664 µs | 6,720,089 |
+| 500,000 | 219,447 | 3,270,656 µs | — | — | — | 4,530,176 µs | 10,377,120 |
 
-Every rate delivered in full, zero drops, and **not one per-second
-sample above 4 ms at any rate** — where the same ladder on the default
-geometry produced 320 ms p99 and second-long stalls visible on every
-host at once.
+Reading it with the vocabulary §3 settled on — last clean rate, knee
+and ceiling are three different things:
 
-Against the §9.1 target of **p50 1 ms at 100k**: 1.111 ms, with p99 at
-2.1 ms. The tail is no longer the thing standing between this and the
-target; the remaining 111 µs is.
+- **Last clean rate: 150,000.** Full offered rate delivered, zero
+  drops, p50 1.4 ms, p99 4.5 ms, and — checked directly — **not one
+  per-second latency sample above 4 ms at any rate up to and including
+  150k**. This is the highest rate the cluster actually serves.
+- **Knee: between 150k and 200k.** At 200k the achieved rate falls to
+  162,651 and p99 steps from 4.5 ms to 30.7 ms.
+- **Ceiling: ~163k–195k delivered.** 200k offered yields 162,651 and
+  250k yields 194,054, both still with zero rig drops. Past that the
+  rig itself is failing, not just the cluster.
+- **The 300k, 400k and 500k rows do not measure the cluster.** Rig
+  drops of 200k, 6.7M and 10.4M mean the load generators could not
+  issue the schedule; their per-second latency climbs monotonically
+  from ~120 ms to ~4.5 s and then falls at the end, which is a backlog
+  filling and draining. They are recorded for completeness and should
+  not be quoted as throughput.
 
-The p99 curve is now flat in the rate — 1.0 ms at 10k to 2.1 ms at
-100k — which is what a system with no periodic stall looks like. The
-"p99 departs at 50k" shape in the previous ladder was entirely the
-rollover, and it departed at 50k only because that is the rate at which
-a 45 s window first contains a segment boundary.
+**The segment fix moved the ceiling, not only the tail.** The previous
+ladder put the last clean rate at ~100k and the ceiling near 123k. The
+same cluster now runs 150,000 clean and delivers ~195k. The rollover
+stalls were costing throughput as well as latency, which the earlier
+"blocking path, not a saturated resource" reading of the ceiling
+(§3, Still open) already pointed at without naming it.
+
+At 200k the per-second spikes are again **correlated across all five
+client boxes** (the same seconds 5, 31, 37, 39, 42, 51 on every host),
+but they are *not* rollovers: at 162,651/s a 262,144-record segment
+fills every 1.6 s, far more often than the six spikes seen. What they
+are is not established.
+
+### 3.1 How this run was configured, exactly
+
+Recorded in full because the shape of this rig was arrived at over many
+iterations, and several earlier conclusions were wrong precisely
+because one of these details differed.
+
+**Fleet** (`raft-tests/deploy/multi_az.tfvars`, `topology = multi_az`):
+
+| role | count | type | placement |
+|---|---|---|---|
+| raft node | 3 | `c7a.4xlarge` | one per AZ: `us-east-1a`, `us-east-1b`, `us-east-1c` |
+| client | 5 | `c7a.2xlarge` | all in `us-east-1a`, in the same cluster placement group as node-0 |
+
+Storage is a gp3 root volume, 100 GB, at its baseline 3,000 IOPS /
+125 MB/s (measured at the old ceiling: 52.7 MB/s, 263 IOPS, 24%
+utilised). Nodes are multi-AZ, so every commit crosses an AZ boundary;
+the clients share an AZ with the leader, which is why both FIX gateways
+are placed on the leader.
+
+**Component placement**
+
+- `exchange_node` × 3 — one per node box. Leader is node-0
+  (`172.31.0.147`), which is also `NODE1` and the FIX host.
+- `exchange_fix_gateway` × 2 — **both on the leader**, ports 8700 and
+  8701, `gateway_id` 0 and 1. On the leader deliberately: the clients
+  are in the leader's AZ, so no session traffic crosses an AZ.
+- `exchange_load_generator` × 4 on each of the 5 client boxes = **20
+  generators, 20 FIX sessions**, round-robin across the two gateways,
+  so **10 sessions per gateway**.
+- `exchange_admin` — run once on the leader to add the instrument.
+
+**Exact flags**
+
+`exchange_node` (each of the three):
+
+```
+--group=exchange
+--peer=<own_priv>:8300:0
+--peers=172.31.0.147:8300:0,172.31.88.176:8300:0,172.31.24.139:8300:0
+--election_timeout_ms=1000
+--data_dir=/data/exchange/data
+--raft_sync=false
+--event_dispatcher_num=1
+--bthread_concurrency=18
+--raft_max_parallel_append_entries_rpc_num=8
+--raft_enable_append_entries_cache=true
+--raft_max_append_entries_cache_size=8
+--raft_leader_batch=256
+--raft_apply_batch=32
+--raft_fsm_caller_commit_batch=512
+--raft_max_segment_size=8388608          # braft log segment, 8 MiB
+--journal_records_per_segment=262144     # THE fix; default is 1048576
+--logtostderr --logbufsecs=0
+```
+
+`exchange_fix_gateway` (i = 0 and 1), started under `ulimit -n 65536`:
+
+```
+--node_peers=172.31.0.147:8300
+--gateway_id=<i>                         # 0, 1 -- namespaces session ids
+--listen_port=<8700+i>
+--data_dir=/data/exchange/data
+--resume_file=/data/exchange/fix_resume_<i>
+--sequence_store_dir=/data/exchange/fix_seq_<i>
+--logtostderr --logbufsecs=0
+```
+
+`exchange_admin`, once:
+
+```
+add-instrument --node_peers=172.31.0.147:8300
+  --symbol=ABC --tick=0.01 --lot=1 --max_qty=1000
+```
+
+`exchange_load_generator`, 20 of them (g = 0..3 per box, box = 0..4,
+client_id 1..20):
+
+```
+--fix_gateway_addr=172.31.0.147:<8700 or 8701>   # round-robin by generator index
+--fix_sender_comp_id=S<box>_<g>                  # unique per generator
+--client_id=<1..20>
+--rate <offered/20>                              # each generator offers 1/20th
+--mode open --pace spin --burst 1
+--warmup 5 --measure 45 --drain_timeout 10
+--max_inflight=50000
+--symbol=ABC --price_levels=500 --flow=cycle
+--hdr_raw_out /tmp/gen_<g>.csv --logtostderr
+```
+
+**Why each of the non-obvious settings is what it is**
+
+| setting | reason |
+|---|---|
+| `--journal_records_per_segment=262144` | Segment rollover was the entire p99 tail; see the section above. |
+| `--price_levels=500` | At 11 levels liquibook's cancel/replace is O(depth-at-price) and `apply` cost 131 µs; at 500 it is ~1 µs. This is a property of the *load shape*, not of the engine. |
+| `--flow=cycle` | The bounded maker → replace → taker → cancel cycle. Every maker is terminated by the session that placed it, so book depth is bounded by session count (6 live orders per 1.5M records) instead of growing without limit. |
+| `--max_inflight=50000` | Open-loop: the generator must not throttle itself, or it measures its own back-pressure rather than the cluster's latency. |
+| `--pace spin --burst 1` | Schedule accuracy; `lag` stays at 0-1 µs in every clean row. |
+| 4 generators per box | One exchange generator tops out near 25,000/s, so one-per-box capped the measurement at ~125k and reported it as the exchange's ceiling. It was the rig. |
+| 2 gateways, both on the leader | Ten sessions per delivery thread rather than twenty, with no cross-AZ hop for session traffic. |
+| `--gateway_id` | Without it both gateways hand out session id 1 and deliver each other's execution reports to the wrong clients — ~30% of replies unanswered, measured. |
+| warm-up 5 s / measure 45 s | Warm-up requests are excluded from the histogram by the harness (`measuring_` gates `record()`); 45 s is long enough to contain several segment rollovers at every rate on this geometry. |
+| `--raft_sync=false` | Fleet convention, matching every other arm; no local NVMe required. |
+
+Reproduce with:
+
+```
+cd raft-tests/exchange
+make start && make start-fix FIX_GATEWAYS=2 && make add-instrument
+make sweep-gen FIX_GATEWAYS=2 GENERATORS_PER_CLIENT=4 MAX_INFLIGHT=50000 \
+  SWEEP_WARMUP=5 SWEEP_MEASURE=45 \
+  SWEEP_FIX_RATES="10000 25000 50000 75000 100000 125000 150000 200000 250000 300000 400000 500000"
+```
 
 ### Still open
 
