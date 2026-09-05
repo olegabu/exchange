@@ -352,4 +352,16 @@ numbers live in `measurements.md`.
 - Disk and network are ruled out at the ceiling: 24% disk utilisation
   and under 6% of the network link, with CPU 64% idle. The ceiling is a
   blocking path, not a saturated resource.
+- The load-generator cycle is now maker → replace → taker → cancel, and
+  every maker is terminated by the session that placed it: filled, or
+  cancelled at the end of its own cycle. Depth is therefore bounded by
+  the number of sessions rather than by run length — 6 live orders per
+  1.5M records, against 52,000 with the previous shape. Cancel-rejects
+  (~23% of messages) are the mechanism, not a fault.
+- p99 departs from p50 at 50k and above. Measured NOT to be the state
+  machine, fills, segment rollover, the journal tail, the output codec,
+  or the node at all — braft reports propose-to-apply p99 of 630 µs and
+  a 2.2 ms maximum. The remaining hypothesis is head-of-line blocking
+  in the gateway's single ring-reader delivery thread
+  (`measurements.md` §3).
 

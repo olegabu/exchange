@@ -64,90 +64,76 @@ inline constexpr int kClOrdIdTag = 11;
 // The shape of the order flow, and the reasons it is shaped this way.
 //
 // A benchmark measures whatever its inputs actually do, so the flow is
-// a designed artefact with two invariants, both asserted by
+// a designed artefact with three invariants, all asserted by
 // tests/load_generator_shape_test.cpp:
 //
 //   1. IT MATCHES. A run that only rests orders measures a book
 //      growing, not an exchange matching.
-//   2. DEPTH IS BOUNDED. Independent of run length -- a seventeen-rate
-//      sweep shares one cluster, so anything that grows linearly ends
-//      the ladder with tens of millions of resting orders.
+//   2. IT USES ALL THREE order-entry messages, because an exchange
+//      measured only on NewOrderSingle is measured on one of its three
+//      paths, and real venues see more cancels than trades.
+//   3. DEPTH IS BOUNDED BY CONSTRUCTION, not by luck.
 //
-// It also exercises ALL THREE order-entry messages, because an
-// exchange that is only ever measured on NewOrderSingle is measured on
-// one of its three paths, and real venues see more cancels than
-// trades.
+// The third one is the hard one and took three attempts.
 //
-// The cycle is seven messages and nets to zero:
+// EVERY MAKER IS TERMINATED BY THE SESSION THAT PLACED IT. The cycle
+// is four messages:
 //
 //   0  35=D  maker rests inside the band
-//   1  35=D  taker, IMMEDIATE-OR-CANCEL, prices through the band
-//   2  35=D  maker rests
-//   3  35=F  cancels step 2                 -> nothing rests
-//   4  35=D  maker rests
-//   5  35=G  replaces step 4 to a new price -> still rests
-//   6  35=D  taker, IMMEDIATE-OR-CANCEL, prices through the band
+//   1  35=G  replaces it to another price in the band
+//   2  35=D  taker, immediate-or-cancel, prices through the band
+//   3  35=F  cancels the maker (by its POST-REPLACE ClOrdID)
 //
-// Five NewOrderSingles, one cancel, one replace; two matches. Makers
-// swap sides every cycle, so both sides of the book are worked.
+// One maker, one taker: supply and demand balance globally however the
+// sessions interleave. And the maker leaves the book on every path --
+// filled by somebody's taker, or cancelled at step 3. If it was
+// already filled the cancel is rejected, which is harmless and is what
+// a real client sees when it cancels an order that just traded. So
+// resting depth is bounded by the number of sessions, not by the
+// length of the run.
 //
-// WHO TRADES WITH WHOM. A cycle stays on one FIX session (see
-// ExchangeFixFanoutRequester, which distributes whole cycles), so its
-// cancel and replace can reference an order that session actually
-// sent -- a ClOrdID is scoped to its CompID, and referencing another
-// session's would simply be rejected. The consequence is that in a
-// SINGLE-session run a client matches against itself. That is legal
-// here only because self-trade prevention is v2 (docs/spec.md §11);
-// once it lands, this flow has to change with it. On the fleet it is
-// largely moot: every client box quotes the same band on the same
-// symbol, so a taker crosses the best resting maker, which is usually
-// somebody else's.
+// What the earlier shapes got wrong, each found by running rather than
+// reading (docs/spec.md §10.1):
 //
-// Two earlier shapes were wrong in ways only a run showed -- buys
-// stepping down from the mid and sells stepping up never overlap, so
-// nothing matched; both sides on one band matched a quarter of the
-// flow but still accumulated buys low and sells high, linear in run
-// length. Caught by a loopback run before any fleet time
-// (docs/spec.md §10.1: instrument, do not theorise).
+//   1. Buys stepping DOWN from the mid, sells stepping UP: the sides
+//      never overlap, so almost nothing matched and every order rested
+//      forever.
+//   2. Both sides on one band: a quarter of the flow matched, but buys
+//      accumulated at the bottom and sells at the top, linear in run
+//      length.
+//   3. Three makers and two takers per cycle with only one explicit
+//      cancel. Balanced ON AVERAGE -- if both takers matched. A taker
+//      that found its level already cleared by another session was
+//      cancelled instead, and that cycle leaked a maker: 2.6% of
+//      orders, 52,000 resting and still climbing on a twenty-session
+//      run. Averages do not bound anything.
 // Which flow to send.
 //
-//   Cycle       the real one: makers rest, takers cross, with cancels
-//               and replaces. What a sweep should report.
-//   RestCancel  a CONTROL, and deliberately unrealistic: every order is
-//               a buy, so nothing can ever cross, and each is cancelled
-//               immediately. Two messages, two outputs, one resting
-//               order per session at a time, and no matching at all. It
-//               isolates the input path, apply-with-a-book and the
-//               output path from the cost of matching -- the fork no
-//               other measurement here separates.
+//   Cycle       the real one: a maker rests, is replaced, a taker
+//               crosses, and the maker is cancelled. What a sweep
+//               should report.
+//   RestCancel  a CONTROL, deliberately unrealistic: every order is a
+//               buy, so nothing can ever cross, and each is cancelled
+//               immediately. It isolates the input path,
+//               apply-with-a-book and the output path from the cost of
+//               matching.
 enum class Flow : std::uint8_t { Cycle, RestCancel };
 
 struct OrderShape {
   Flow flow = Flow::Cycle;
   std::string symbol = "ABC";
   std::int64_t midTicks = 10000;   // 100.00 at a 0.01 tick
-  // How wide the band makers rest in -- and therefore DEPTH PER PRICE
-  // LEVEL, which is the single most important property of this flow.
-  //
-  // It was 5, which put the entire book into eleven price levels. That
-  // is not what a venue looks like, and it made liquibook's
-  // cancel/replace the dominant cost: it locates an order by SCANNING
-  // its price level, so cost is linear in depth at that price. Measured
-  // at 45k on the fleet, changing only this number:
-  //
-  //     5 levels    apply 131us p50, 43,813 achieved, p50 2.46ms
-  //   500 levels    apply   1us p50, 44,712 achieved, p50 1.06ms
-  //
-  // 131x less work in apply(), same matching (0.29 matches per record
-  // either way), and a book that stays around 5k orders instead of
-  // 22k. Over the full ladder the knee moved from ~25k to ~125k.
+  // How wide the band is -- and so DEPTH PER PRICE LEVEL, which is what
+  // liquibook's cancel and replace cost is linear in, since they locate
+  // an order by scanning its price level. Measured at 45k, changing
+  // only this: 11 levels gave apply() 131us p50, 1001 levels gave 1us.
   std::int64_t priceLevels = 500;
   std::int64_t quantityLots = 1;
 };
 
 // Messages per cycle. A cycle must stay on one session, so the fanout
 // distributes cycles rather than individual messages.
-inline constexpr std::int64_t kCycleLength = 7;
+inline constexpr std::int64_t kCycleLength = 4;
 inline constexpr std::int64_t kRestCancelCycleLength = 2;
 
 inline constexpr std::int64_t cycleLength(Flow flow) {
@@ -163,9 +149,10 @@ struct PlannedStep {
   bool buy = true;
   std::int64_t priceTicks = 0;
   bool maker = true;  // NewOrder only
-  // Cancel and Replace always reference the immediately preceding
-  // message, which is the maker they act on.
-  bool targetsPrevious = false;
+  // How many messages back the order this one acts on was sent, or 0
+  // for none. A cancel after a replace must name the order's CURRENT
+  // ClOrdID, which is the replace's -- not the original maker's.
+  int targetOffset = 0;
 };
 
 inline PlannedStep plan(const OrderShape& shape, std::int64_t sequence) {
@@ -176,17 +163,16 @@ inline PlannedStep plan(const OrderShape& shape, std::int64_t sequence) {
     const std::int64_t pair = sequence / kRestCancelCycleLength;
     const std::int64_t price = shape.midTicks - 1 - (pair % levels);
     if (sequence % kRestCancelCycleLength == 0) {
-      return {Action::NewOrder, true, price, true, false};
+      return {Action::NewOrder, true, price, true, 0};
     }
-    return {Action::Cancel, true, price, false, true};
+    return {Action::Cancel, true, price, false, 1};
   }
+
   const std::int64_t cycle = sequence / kCycleLength;
   const std::int64_t step = sequence % kCycleLength;
   const bool makerBuys = (cycle & 1) == 0;
   const std::int64_t away = 1 + (cycle % levels);
   const std::int64_t makerPrice = makerBuys ? shape.midTicks - away : shape.midTicks + away;
-  // A different tick, still inside the band, so the replace really
-  // moves the order and the taker after it still crosses.
   const std::int64_t replaceAway = 1 + ((cycle + 1) % levels);
   const std::int64_t replacePrice =
       makerBuys ? shape.midTicks - replaceAway : shape.midTicks + replaceAway;
@@ -197,14 +183,15 @@ inline PlannedStep plan(const OrderShape& shape, std::int64_t sequence) {
 
   switch (step) {
     case 1:
-    case 6:
-      return {Action::NewOrder, !makerBuys, takerPrice, false, false};
+      return {Action::Replace, makerBuys, replacePrice, false, 1};
+    case 2:
+      return {Action::NewOrder, !makerBuys, takerPrice, false, 0};
     case 3:
-      return {Action::Cancel, makerBuys, makerPrice, false, true};
-    case 5:
-      return {Action::Replace, makerBuys, replacePrice, false, true};
-    default:  // 0, 2, 4
-      return {Action::NewOrder, makerBuys, makerPrice, true, false};
+      // Two back: the REPLACE renamed the order, so this is its
+      // current ClOrdID.
+      return {Action::Cancel, makerBuys, replacePrice, false, 2};
+    default:
+      return {Action::NewOrder, makerBuys, makerPrice, true, 0};
   }
 }
 
@@ -412,10 +399,11 @@ class ExchangeFixRequester : public LoadGeneratorRequester {
       pending_[nonce] = std::move(onDone);
     }
     const PlannedStep planned = plan(shape_, sequence);
-    // The maker a cancel or replace acts on is the previous message on
-    // this same session -- the fanout distributes whole cycles for
-    // exactly this reason.
-    const std::int64_t target = (clientId_ << clientIdShift_) | (sequence - 1);
+    // The order a cancel or replace acts on was sent earlier on THIS
+    // session -- the fanout distributes whole cycles for exactly this
+    // reason.
+    const std::int64_t target =
+        (clientId_ << clientIdShift_) | (sequence - planned.targetOffset);
     // Built OUTSIDE the lock: a FIX session must assign MsgSeqNum and
     // emit bytes in one order, so sendApplication() has to be
     // serialized, but nothing else does. Formatting the body under the

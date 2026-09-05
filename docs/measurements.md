@@ -315,6 +315,68 @@ of them before reading any result; my hand-rolled loop did not, and the
 number it produced was flattering enough that only its implausibility
 gave it away.
 
+### The ladder with a bounded flow, 20 sessions, two gateways
+
+Configuration: 5 client boxes × 4 generators = **20 sessions**, split
+across **two gateways on the leader** (a gateway must be colocated with
+a node to tail its journal, so a follower would add a cross-AZ propose
+hop). `--max_inflight=50000`, 1,001 price levels, gateways confirmed
+accepting connections before any client starts.
+
+| offered | achieved | p50 | p90 | p99 | dropped |
+|---|---|---|---|---|---|
+| 25,000 | 25,000 | 809 µs | 932 µs | 1,284 µs | 0 |
+| 50,000 | 49,980 | 906 µs | 1,081 µs | 233 ms | 0 |
+| 75,000 | **74,980** | 1,022 µs | 1,288 µs | 387 ms | 0 |
+| 100,000 | 72,154 | 1,146 µs | 1,705 µs | 225 ms | 0 |
+| 125,000 | 89,022 | 1,274 µs | 2,104 µs | 214 ms | 0 |
+| 150,000 | 102,665 | 1,432 µs | 2,820 µs | 236 ms | 0 |
+| 200,000 | 128,895 | 2,258 µs | 36 ms | 214 ms | 0 |
+
+Full offered rate through **75,000**, p50 near 1 ms throughout, and
+**zero rig drops at every rate**. Ceiling ~129,000.
+
+The book is now bounded by construction: **6 live orders** after 1.5M
+records, against ~52,000 before, with matching healthy (349,033 matches
+per 1.5M records). The 349,003 cancel-rejects are the mechanism, not a
+fault: a maker filled before its own cancel arrived. Every maker leaves
+the book on one path or the other, so depth is bounded by the number of
+sessions rather than the length of the run.
+
+### Why p99 departs at 50k, and what it is not
+
+p50 stays near 1 ms while p99 jumps to ~230 ms from 50k up. The shape
+says what kind of thing it is: at 50,000/s over 30 s that is 1.5M
+requests, so p99 = 233 ms means roughly **15,000 slow requests** — far
+too many to be "fills cost more". But a single ~300 ms stall at that
+rate catches ~15,000 in flight, so one or two brief stalls per run
+reproduce the number exactly. At 25k a 30 s window usually contains
+none, which is why p99 is clean there.
+
+Ruled out by direct measurement, with every probe verified in
+`/proc/<pid>/environ` first:
+
+| suspect | probe | result |
+|---|---|---|
+| The state machine / fills | `SEQ_APPLY_STALL_US=20000` | **no apply exceeded 20 ms** in a 40 s run at 50k |
+| Journal segment rollover | `SEQ_SEGMENT_OPEN_US=1000` | **zero** segment opens over 1 ms |
+| Journal tail and output codec | `SEQ_TAIL_STALL_US=20000` | **no tail stall** over 20 ms |
+| The node: propose → commit → apply | braft's own `node_propose_batch_apply_wait_us` | p50 492 µs, **p99 630 µs**, max 2,206 µs |
+
+So the answer to "is it the book, or fills taking longer" is **no**: the
+whole node-side path, matching included, is tight to a 2.2 ms maximum.
+The 230 ms tail happens entirely outside the node.
+
+What is left is the gateway's session I/O and the client. The strongest
+remaining hypothesis, untested: `FixOutputTransport` delivers to every
+session from **one ring-reader thread**, so a single session whose
+socket blocks — a client slow to read, a full TCP window — stalls
+delivery for all of them. That is consistent with everything measured:
+nothing CPU-saturated, the node clean, and a second gateway (halving
+the sessions per delivery thread) markedly improving the tail at high
+rates. Testing it needs a probe around the send path, or a run with one
+deliberately slow client.
+
 ### Still open
 
 - **What the ~110–125k ceiling is — still open, but no longer disk or

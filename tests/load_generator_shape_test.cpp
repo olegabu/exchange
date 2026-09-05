@@ -44,6 +44,12 @@ struct Replay {
   // however unbalanced it is under concurrency.
   int sessions = 1;
   std::size_t matches = 0, accepts = 0, cancels = 0, replaces = 0, rejects = 0, peakResting = 0;
+  // Split out, because they mean very different things. An order
+  // reject means the flow sent something inadmissible -- a bug. A
+  // CANCEL reject means the maker was filled before its own cancel
+  // arrived, which is the flow working: the order left the book by the
+  // other path.
+  std::size_t orderRejects = 0, cancelRejects = 0, replaceRejects = 0;
 
   explicit Replay(bench::OrderShape s, int sessionCount = 1)
       : shape(std::move(s)), sessions(sessionCount) {
@@ -93,7 +99,7 @@ struct Replay {
       const std::int64_t seq = next[who]++;
       const bench::PlannedStep p = bench::plan(shape, seq);
       const std::string raw = frame(bench::msgTypeOf(p.action),
-                                    bench::buildBody(shape, p, seq, seq - 1),
+                                    bench::buildBody(shape, p, seq, seq - p.targetOffset),
                                     "LOADGEN" + std::to_string(who));
       sequencer::ClientRequest request;
       request.body = sequencer::Payload(reinterpret_cast<const std::byte*>(raw.data()), raw.size());
@@ -110,6 +116,9 @@ struct Replay {
         replaces += o.is("OrderReplaced");
         rejects +=
             o.is("OrderRejected") || o.is("OrderCancelRejected") || o.is("OrderReplaceRejected");
+        orderRejects += o.is("OrderRejected");
+        cancelRejects += o.is("OrderCancelRejected");
+        replaceRejects += o.is("OrderReplaceRejected");
       }
       peakResting = std::max(peakResting, h.sm.liveOrderCount());
     }
@@ -123,19 +132,22 @@ TEST(LoadGeneratorShape, ExercisesAllThreeOrderEntryMessages) {
   // Non-vacuity: a sweep that only ever sends NewOrderSingle measures
   // one of the exchange's three paths.
   EXPECT_GT(r.accepts, 0u);
-  EXPECT_GT(r.cancels, 0u) << "no 35=F in the flow";
-  EXPECT_GT(r.replaces, 0u) << "no 35=G in the flow";
-  EXPECT_EQ(r.rejects, 0u) << "the flow must be admissible; a sweep of rejects measures nothing";
-  // Two matches per cycle (steps 1 and 6), one replace (step 5).
-  EXPECT_EQ(r.matches, 2u * kCycles);
-  EXPECT_EQ(r.replaces, static_cast<std::size_t>(kCycles));
-  // One requested cancel per cycle (step 3); liquibook also reports the
-  // replace's re-insertion, so this is a lower bound.
-  EXPECT_GE(r.cancels, static_cast<std::size_t>(kCycles));
+  EXPECT_EQ(r.orderRejects, 0u)
+      << "the flow sent an inadmissible order; a sweep of rejects measures nothing";
+  // Every cancel is answered, either by cancelling the maker or by
+  // telling us it had already filled. Both retire the order, which is
+  // the property that bounds the book.
+  EXPECT_EQ(r.cancels + r.cancelRejects, static_cast<std::size_t>(kCycles))
+      << "one 35=F per cycle must be answered: " << r.cancels << " cancelled, " << r.cancelRejects
+      << " already filled";
+  EXPECT_EQ(r.replaces + r.replaceRejects, static_cast<std::size_t>(kCycles)) << "one 35=G per cycle";
+  // One maker and one taker per cycle, so at most one match each.
+  EXPECT_GT(r.matches, static_cast<std::size_t>(kCycles) / 2)
+      << "the flow should match on most cycles";
 }
 
 TEST(LoadGeneratorShape, MatchesAndLeavesABoundedBook) {
-  constexpr int kMessages = 7 * 3000;
+  constexpr int kMessages = static_cast<int>(bench::kCycleLength) * 3000;
   Replay r{bench::OrderShape{}};
   r.run(kMessages);
   EXPECT_GT(r.matches, static_cast<std::size_t>(kMessages) / 8)
@@ -168,8 +180,8 @@ TEST(LoadGeneratorShape, SeveralSessionsSharingTheBookDoNotAccumulate) {
     EXPECT_GT(r.matches, 0u) << "the interleaved flow must still match";
     return Result{r.rejects, r.h.sm.liveOrderCount(), r.matches};
   };
-  const Result shortRun = measure(7 * 5 * 200);
-  const Result longRun = measure(7 * 5 * 800);
+  const Result shortRun = measure(static_cast<int>(bench::kCycleLength) * 5 * 200);
+  const Result longRun = measure(static_cast<int>(bench::kCycleLength) * 5 * 800);
 
   // The signal is REJECTS, not depth. In this deterministic replay a
   // plain limit taker still finds a maker, so the book stays small
@@ -182,10 +194,17 @@ TEST(LoadGeneratorShape, SeveralSessionsSharingTheBookDoNotAccumulate) {
   // them it is 2 -> 2. On the five-client fleet the same defect showed
   // as 97,293 cancel/replace rejects and 53,127 orders left resting and
   // still climbing.
-  EXPECT_LT(longRun.rejects, shortRun.rejects * 2 + 10)
-      << "rejects grew with run length: " << shortRun.rejects << " -> " << longRun.rejects
-      << " -- the flow is not self-balancing across sessions";
-  EXPECT_LT(longRun.live, 50u) << "resting orders after the long run: " << longRun.live;
+  // Depth is what must not grow. Every maker is terminated by its own
+  // session -- filled, or cancelled at the end of its cycle -- so
+  // resting orders are bounded by the number of sessions in flight,
+  // whatever the run length. Four times the messages, same depth.
+  EXPECT_LE(longRun.live, 3 * 5u)
+      << "resting orders after the long run: " << longRun.live << " (5 sessions)";
+  EXPECT_LE(longRun.live, shortRun.live + 5)
+      << "depth grew with run length: " << shortRun.live << " -> " << longRun.live;
+  // Cancel-rejects are expected and harmless: a maker that was filled
+  // before its own cancel arrived. What matters is that they do not
+  // mean a LEAKED order -- which the depth assertions above cover.
 }
 
 // The rest-cancel control must do exactly what it claims: never match,
@@ -219,8 +238,8 @@ TEST(LoadGeneratorShape, DepthDoesNotGrowWithRunLength) {
     r.run(messages);
     return r.peakResting;
   };
-  const std::size_t shortRun = peakOver(7 * 500);
-  const std::size_t longRun = peakOver(7 * 2000);
+  const std::size_t shortRun = peakOver(static_cast<int>(bench::kCycleLength) * 500);
+  const std::size_t longRun = peakOver(static_cast<int>(bench::kCycleLength) * 2000);
   EXPECT_EQ(shortRun, longRun) << "depth grew with run length: " << shortRun << " -> " << longRun;
 }
 
