@@ -142,7 +142,7 @@ issue is the work item.
   on reconnect. `tests/fix_end_to_end_test.cpp` carries a two-client
   reconnect drill asserting the correct behaviour, `GTEST_SKIP`ped until
   the fix lands. Tracked as
-  **[olegabu/sequencer#1](https://github.com/olegabu/sequencer/issues/1)**.
+  **[opensequencer/sequencer#1](https://github.com/opensequencer/sequencer/issues/1)**.
 - **sequencer FIX gateway, resends carry no `OrigSendingTime`.** FIX
   4.4 requires tag 122 on a `PossDup` retransmission.
   `SentRecord::sendingTime` is declared
@@ -154,7 +154,21 @@ issue is the work item.
   strict client engine may still reject it.
   `tests/fix_end_to_end_test.cpp` asserts the correct behaviour and
   `GTEST_SKIP`s while the gap stands. Tracked as
-  **[olegabu/sequencer#2](https://github.com/olegabu/sequencer/issues/2)**.
+  **[opensequencer/sequencer#2](https://github.com/opensequencer/sequencer/issues/2)**.
+- **sequencer journal, segment rollover blocks the apply thread.** At
+  the default `--journal_records_per_segment=1048576` every client sees
+  a ~300 ms stall at each segment boundary -- once every 20.97 s at
+  50,000/s -- and it accounts for the entire p99. Quartering the flag
+  takes p99 from 320 ms to 5.3 ms with p50 unmoved. Creation and
+  sealing are already off the apply thread, but `roll()` still waits on
+  the worker (`journal/include/sequencer/journal/writer.hpp:264-276`),
+  and both of the worker's jobs scale with segment size while the
+  90%-to-100% preparation window shrinks with it. Worked around here by
+  setting the flag in every fleet run; tracked as
+  **[opensequencer/sequencer#3](https://github.com/opensequencer/sequencer/issues/3)**,
+  which also asks for a probe on the roll wait -- there is none today,
+  and `SEQ_SEGMENT_OPEN_US` watches the reader, not the writer, so its
+  silence misled this investigation for a while.
 - **brpc cannot be run under ThreadSanitizer.** Its `bthread` is an M:N
   scheduler that switches stacks under the runtime, which tsan's
   happens-before model cannot follow, so every brpc-linked process
@@ -381,4 +395,17 @@ numbers live in `measurements.md`.
   that head-of-line blocking in the gateway's ring-reader thread was
   the likely cause. The interval predicted the result; the hypothesis
   predicted nothing.
-
+- **The three repos moved to the `opensequencer` GitHub org**
+  (2026-09-05): `opensequencer/{sequencer,raft-tests,exchange}`, all
+  public, transferred with `gh api -X POST .../transfer` so history,
+  issues and stars carry over and the old URLs redirect. Locally the
+  parent directory is renamed `~/workspace/total-order` →
+  `~/workspace/opensequencer`, with a compatibility symlink left at the
+  old name: the large CMake build trees record absolute paths, and the
+  existing `~/workspace/{sequencer,raft-tests,exchange}` symlinks exist
+  for exactly that reason. The compatibility symlink can go once every
+  build tree has been reconfigured from scratch. `make check-generated`
+  and `make preflight` were run after the rename to prove nothing
+  depended on the old path; the schema's `description` attribute
+  mentions the project name but does not reach generated code, so no
+  wire layout moved.

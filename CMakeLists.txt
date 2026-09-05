@@ -39,7 +39,7 @@ if(EXCHANGE_USE_SEQUENCER_PACKAGE)
 else()
   if(NOT EXISTS "${SEQUENCER_DIR}/CMakeLists.txt")
     message(FATAL_ERROR "SEQUENCER_DIR=${SEQUENCER_DIR} has no CMakeLists.txt; "
-      "point it at a sequencer checkout (CLAUDE.md: siblings under total-order/)")
+      "point it at a sequencer checkout (CLAUDE.md: siblings under opensequencer/)")
   endif()
   # Its tests and benchmarks are its own business; EXCLUDE_FROM_ALL so
   # only what we link gets built.

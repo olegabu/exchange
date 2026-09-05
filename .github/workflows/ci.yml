@@ -20,7 +20,7 @@ jobs:
       # VCPKG_MANIFEST_DIR both resolve exactly as on a developer machine.
       - uses: actions/checkout@v4
         with:
-          repository: olegabu/sequencer
+          repository: opensequencer/sequencer
           path: sequencer
 
       # g++-10: C++20 <span>; same reason as sequencer's own CI.

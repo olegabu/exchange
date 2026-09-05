@@ -172,10 +172,10 @@ shown exactly which targets and headers must be exported. A second
 consumer, `ledger`, is planned; the goal is that developers build
 replicated state machines on `sequencer` as a library.
 
-The three repositories live together under `total-order/`:
+The three repositories live together under `opensequencer/`:
 
 ```
-total-order/
+opensequencer/
   sequencer/     the platform
   raft-tests/    its benchmark harness
   exchange/      this, an application built on it

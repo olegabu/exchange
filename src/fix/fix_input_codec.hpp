@@ -28,7 +28,7 @@ namespace exchange::fix {
 // the id to the transport. Both halves live in this repository, so no
 // change to sequencer is needed.
 //
-// It does not fix the reconnect gap (olegabu/sequencer#1): the low half
+// It does not fix the reconnect gap (opensequencer/sequencer#1): the low half
 // is still a per-connection counter, so it is reused after a restart.
 class ExchangeFixInputCodec final : public sequencer::InputCodec {
  public:

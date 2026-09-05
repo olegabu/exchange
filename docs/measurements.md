@@ -280,7 +280,7 @@ delivers only what its own id addresses, stripping the half back off
 before handing the id to the transport.
 `FixCodecs.TwoGatewaysDoNotDeliverEachOthersReports` asserts it and was
 shown to fail without the fix. It does **not** fix the reconnect gap
-(olegabu/sequencer#1): the low half is still a per-connection counter.
+(opensequencer/sequencer#1): the low half is still a per-connection counter.
 
 Fixing it did not change the two-gateway throughput, so the collision
 was a correctness bug, not the cause of the shortfall.
@@ -462,8 +462,9 @@ thing it appears to name.
   not 230 ms.
 - Upstream, this is worth fixing rather than tuning around: the next
   segment and its index can be created ahead of the boundary on a
-  background thread, so no rollover is ever on the write path. To be
-  filed against `sequencer`.
+  background thread, so no rollover is ever on the write path. Filed as
+  opensequencer/sequencer#3, which also asks for a probe on the roll wait --
+  the thing that would settle which of the worker's two jobs is late.
 - The earlier hypothesis recorded here — a single ring-reader thread in
   `FixOutputTransport` stalled by one slow session — was **wrong**. It
   fitted the evidence available and predicted nothing that came true;

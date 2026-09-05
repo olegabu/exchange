@@ -20,7 +20,7 @@
                    id="1"
                    version="0"
                    semanticVersion="1.0.0"
-                   description="total-order exchange, v1 CLOB"
+                   description="opensequencer exchange, v1 CLOB"
                    byteOrder="littleEndian">
   <types>
     <composite name="messageHeader" description="Standard SBE message header">
