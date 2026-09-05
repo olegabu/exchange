@@ -142,7 +142,20 @@ issue is the work item.
   on reconnect. `tests/fix_end_to_end_test.cpp` carries a two-client
   reconnect drill asserting the correct behaviour, `GTEST_SKIP`ped until
   the fix lands. Tracked as
-  **[opensequencer/sequencer#1](https://github.com/opensequencer/sequencer/issues/1)**.
+  **[opensequencer/sequencer#1](https://github.com/opensequencer/sequencer/issues/1)**
+  — which is **closed as completed, but the defect still reproduces**
+  against `origin/main` (verified 2026-09-05 with the checkout 0
+  commits behind: the drill delivered 1 report addressed to ALPHA to a
+  reconnecting BRAVO). `CapturingFanout::toSession` still takes its
+  `SessionId` as an *unnamed* parameter and discards it
+  (`fix_output_transport.cpp:24`), and `catchUp` forwards every
+  captured body to the reconnecting session with no addressee filter
+  (`fix_output_transport.cpp:359-372`). Note the resend path using the
+  same class at line 87 is correct — it indexes `outputs` by an index
+  recorded per session in a `SentRecord` — so it is plausible the
+  resend fix was read as covering catch-up too. The `--gateway_id`
+  ownership filter added here narrows the leak to sessions sharing one
+  gateway; it does not close it.
 - **sequencer FIX gateway, resends carry no `OrigSendingTime`.** FIX
   4.4 requires tag 122 on a `PossDup` retransmission.
   `SentRecord::sendingTime` is declared
