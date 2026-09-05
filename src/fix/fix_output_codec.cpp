@@ -132,7 +132,7 @@ void ExchangeFixOutputCodec::toOutput(const sequencer::journal::RecordView& reco
         b.decimal(38, m->quantity());
         if (m->price() > 0) b.decimal(44, m->price());
         b.decimal(151, m->quantity()).decimal(14, 0).decimal(6, 0);
-        fanout.toSession(m->sessionId(), b.bytes());
+        if (const auto to = mine(m->sessionId())) fanout.toSession(*to, b.bytes());
         break;
       }
       case OrderRejected::sbeTemplateId(): {
@@ -152,7 +152,7 @@ void ExchangeFixOutputCodec::toOutput(const sequencer::journal::RecordView& reco
         if (m->price() > 0) b.decimal(44, m->price());
         b.decimal(151, 0).decimal(14, 0).decimal(6, 0);
         b.tag(103, rt.ordRejReason).tag(58, rt.text);
-        fanout.toSession(m->sessionId(), b.bytes());
+        if (const auto to = mine(m->sessionId())) fanout.toSession(*to, b.bytes());
         break;
       }
       case Fill::sbeTemplateId(): {
@@ -172,7 +172,7 @@ void ExchangeFixOutputCodec::toOutput(const sequencer::journal::RecordView& reco
           b.decimal(38, e.leavesQty() + e.cumQty());
           b.decimal(32, e.lastQty()).decimal(31, e.lastPx());
           b.decimal(151, e.leavesQty()).decimal(14, e.cumQty()).decimal(6, e.avgPx());
-          fanout.toSession(e.sessionId(), b.bytes());
+          if (const auto to = mine(e.sessionId())) fanout.toSession(*to, b.bytes());
           ++k;
         }
         break;
@@ -192,7 +192,7 @@ void ExchangeFixOutputCodec::toOutput(const sequencer::journal::RecordView& reco
         if (m->price() > 0) b.decimal(44, m->price());
         b.decimal(151, 0).decimal(14, m->cumQty()).decimal(6, m->avgPx());
         if (const char* text = cancelText(m->reasonRaw())) b.tag(58, text);
-        fanout.toSession(m->sessionId(), b.bytes());
+        if (const auto to = mine(m->sessionId())) fanout.toSession(*to, b.bytes());
         break;
       }
       case OrderReplaced::sbeTemplateId(): {
@@ -208,7 +208,7 @@ void ExchangeFixOutputCodec::toOutput(const sequencer::journal::RecordView& reco
         b.tag(54, std::string(1, sideChar(m->sideRaw())));
         b.decimal(38, m->quantity()).decimal(44, m->price());
         b.decimal(151, m->leavesQty()).decimal(14, m->cumQty()).decimal(6, m->avgPx());
-        fanout.toSession(m->sessionId(), b.bytes());
+        if (const auto to = mine(m->sessionId())) fanout.toSession(*to, b.bytes());
         break;
       }
       case OrderCancelRejected::sbeTemplateId():
@@ -236,7 +236,7 @@ void ExchangeFixOutputCodec::toOutput(const sequencer::journal::RecordView& reco
         b.tag(39, "8").tag(434, isReplace ? "2" : "1");
         b.tag(102, reason == RejectReason::UnknownOrder || reason == RejectReason::NotOrderOwner ? "1" : "99");
         b.tag(58, rt.text);
-        fanout.toSession(sessionId, b.bytes());
+        if (const auto to = mine(sessionId)) fanout.toSession(*to, b.bytes());
         break;
       }
       default:

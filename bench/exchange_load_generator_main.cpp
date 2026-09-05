@@ -44,6 +44,10 @@ DEFINE_string(symbol, "ABC", "The instrument to trade; must already exist (excha
 DEFINE_int64(mid_ticks, 10000, "The mid price, in ticks (10000 = 100.00 at a 0.01 tick)");
 DEFINE_int64(price_levels, 5, "How many ticks either side of the mid the flow walks");
 DEFINE_int64(quantity_lots, 1, "Order quantity, in lots");
+DEFINE_string(flow, "cycle",
+              "\"cycle\": the real flow -- makers rest, takers cross, with cancels and replaces. "
+              "\"rest-cancel\": a CONTROL that never matches -- every order is a buy, cancelled "
+              "immediately -- which isolates everything except matching");
 
 DEFINE_string(mode, "open", "\"open\" (fixed rate) or \"closed\" (fixed in-flight)");
 DEFINE_int64(rate, 10000, "Offered rate, requests/sec (open mode)");
@@ -72,12 +76,19 @@ int main(int argc, char** argv) {
   }
 
   exchange::bench::OrderShape shape;
+  if (FLAGS_flow == "rest-cancel") {
+    shape.flow = exchange::bench::Flow::RestCancel;
+  } else if (FLAGS_flow != "cycle") {
+    LOG(ERROR) << "exchange_load_generator: --flow must be \"cycle\" or \"rest-cancel\"";
+    return 1;
+  }
   shape.symbol = FLAGS_symbol;
   shape.midTicks = FLAGS_mid_ticks;
   shape.priceLevels = FLAGS_price_levels < 1 ? 1 : FLAGS_price_levels;
   shape.quantityLots = FLAGS_quantity_lots;
 
-  auto fan = std::make_unique<exchange::bench::ExchangeFixFanoutRequester>();
+  auto fan = std::make_unique<exchange::bench::ExchangeFixFanoutRequester>(
+      exchange::bench::cycleLength(shape.flow));
   for (std::size_t i = 0; i < addrs.size(); ++i) {
     const std::size_t colon = addrs[i].rfind(':');
     if (colon == std::string::npos) {

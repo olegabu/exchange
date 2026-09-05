@@ -188,6 +188,28 @@ TEST(LoadGeneratorShape, SeveralSessionsSharingTheBookDoNotAccumulate) {
   EXPECT_LT(longRun.live, 50u) << "resting orders after the long run: " << longRun.live;
 }
 
+// The rest-cancel control must do exactly what it claims: never match,
+// never reject, and hold one order per session. A control that quietly
+// matched, or that rejected its own cancels, would make the comparison
+// it exists for meaningless.
+TEST(LoadGeneratorShape, RestCancelControlNeverMatches) {
+  bench::OrderShape shape;
+  shape.flow = bench::Flow::RestCancel;
+  Replay r{shape, 5};
+  r.run(2 * 5 * 1000);
+  EXPECT_EQ(r.matches, 0u) << "the control must never match; that is its whole point";
+  // The replay deliberately starts each session part-way through a
+  // cycle, to get the phase diversity the multi-session test needs, so
+  // a session that starts on the cancel step emits one orphan cancel.
+  // That is a startup effect of the harness, not of the flow: what
+  // matters is that it does not recur.
+  EXPECT_LE(r.rejects, static_cast<std::size_t>(r.sessions))
+      << "more rejects than one startup orphan per session: " << r.rejects;
+  EXPECT_GT(r.accepts, 0u);
+  EXPECT_GT(r.cancels, 0u);
+  EXPECT_LE(r.h.sm.liveOrderCount(), 5u) << "at most one resting order per session";
+}
+
 // Doubling the run must not move the peak: that is what "bounded"
 // means, and a shape that merely grew slowly would pass a single length
 // and fail this.

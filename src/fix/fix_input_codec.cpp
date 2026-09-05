@@ -117,7 +117,7 @@ Result ExchangeFixInputCodec::toInput(const sequencer::ClientRequest& request) {
       return error("a Market order carries no Price (44)");
     }
     auto m = wire::encode<NewOrder>(buffer);
-    m.sessionId(request.sessionId)
+    m.sessionId(wireSessionId(gatewayId_, request.sessionId))
         .putSenderCompId(wire::fixed<16>(f.sender).data())
         .putAccount(wire::fixed<16>(f.account).data())
         .putClOrdId(wire::fixed<20>(f.clOrdId).data())
@@ -133,7 +133,7 @@ Result ExchangeFixInputCodec::toInput(const sequencer::ClientRequest& request) {
   if (!fits(f.origClOrdId, 20)) return error("OrigClOrdID (41) missing or longer than 20");
   if (type == "F") {
     auto m = wire::encode<CancelOrder>(buffer);
-    m.sessionId(request.sessionId)
+    m.sessionId(wireSessionId(gatewayId_, request.sessionId))
         .putSenderCompId(wire::fixed<16>(f.sender).data())
         .putAccount(wire::fixed<16>(f.account).data())
         .putClOrdId(wire::fixed<20>(f.clOrdId).data())

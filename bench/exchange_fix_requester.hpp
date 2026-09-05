@@ -109,7 +109,21 @@ inline constexpr int kClOrdIdTag = 11;
 // flow but still accumulated buys low and sells high, linear in run
 // length. Caught by a loopback run before any fleet time
 // (docs/spec.md §10.1: instrument, do not theorise).
+// Which flow to send.
+//
+//   Cycle       the real one: makers rest, takers cross, with cancels
+//               and replaces. What a sweep should report.
+//   RestCancel  a CONTROL, and deliberately unrealistic: every order is
+//               a buy, so nothing can ever cross, and each is cancelled
+//               immediately. Two messages, two outputs, one resting
+//               order per session at a time, and no matching at all. It
+//               isolates the input path, apply-with-a-book and the
+//               output path from the cost of matching -- the fork no
+//               other measurement here separates.
+enum class Flow : std::uint8_t { Cycle, RestCancel };
+
 struct OrderShape {
+  Flow flow = Flow::Cycle;
   std::string symbol = "ABC";
   std::int64_t midTicks = 10000;   // 100.00 at a 0.01 tick
   // How wide the band makers rest in -- and therefore DEPTH PER PRICE
@@ -134,6 +148,11 @@ struct OrderShape {
 // Messages per cycle. A cycle must stay on one session, so the fanout
 // distributes cycles rather than individual messages.
 inline constexpr std::int64_t kCycleLength = 7;
+inline constexpr std::int64_t kRestCancelCycleLength = 2;
+
+inline constexpr std::int64_t cycleLength(Flow flow) {
+  return flow == Flow::RestCancel ? kRestCancelCycleLength : kCycleLength;
+}
 
 enum class Action : std::uint8_t { NewOrder, Cancel, Replace };
 
@@ -151,6 +170,16 @@ struct PlannedStep {
 
 inline PlannedStep plan(const OrderShape& shape, std::int64_t sequence) {
   const std::int64_t levels = shape.priceLevels < 1 ? 1 : shape.priceLevels;
+  if (shape.flow == Flow::RestCancel) {
+    // Always a buy, so no order can ever cross another; spread over the
+    // band so depth per price stays realistic.
+    const std::int64_t pair = sequence / kRestCancelCycleLength;
+    const std::int64_t price = shape.midTicks - 1 - (pair % levels);
+    if (sequence % kRestCancelCycleLength == 0) {
+      return {Action::NewOrder, true, price, true, false};
+    }
+    return {Action::Cancel, true, price, false, true};
+  }
   const std::int64_t cycle = sequence / kCycleLength;
   const std::int64_t step = sequence % kCycleLength;
   const bool makerBuys = (cycle & 1) == 0;
@@ -538,6 +567,8 @@ class ExchangeFixRequester : public LoadGeneratorRequester {
 // split exact.
 class ExchangeFixFanoutRequester : public LoadGeneratorRequester {
  public:
+  explicit ExchangeFixFanoutRequester(std::int64_t cycle = kCycleLength) : cycle_(cycle < 1 ? 1 : cycle) {}
+
   void add(std::unique_ptr<ExchangeFixRequester> session) { sessions_.push_back(std::move(session)); }
 
   void send(std::int64_t sequence, std::int64_t sendTimeUs,
@@ -550,12 +581,12 @@ class ExchangeFixFanoutRequester : public LoadGeneratorRequester {
     // sweep that measured rejects rather than matching. Whole cycles
     // still distribute evenly, since the harness's sequence is
     // monotonic.
-    const std::size_t which =
-        static_cast<std::size_t>(sequence / kCycleLength) % sessions_.size();
+    const std::size_t which = static_cast<std::size_t>(sequence / cycle_) % sessions_.size();
     sessions_[which]->send(sequence, sendTimeUs, std::move(onDone));
   }
 
  private:
+  const std::int64_t cycle_ = kCycleLength;
   std::vector<std::unique_ptr<ExchangeFixRequester>> sessions_;
 };
 

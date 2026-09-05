@@ -246,6 +246,65 @@ TEST(FixOutputCodec, ExecutionReportsAreAddressedAndDeterministic) {
   EXPECT_EQ(m[54], "1");
 }
 
+// Two gateways tailing one journal both number their client sessions
+// from 1, so without a gateway id in the wire session id an output
+// addressed to "session 1" is delivered by BOTH -- once to the right
+// client and once to a stranger. On the fleet that lost ~30% of
+// replies as unanswered.
+//
+// This asserts the property that was broken: a record produced by
+// gateway 0's client is delivered by gateway 0 and IGNORED by
+// gateway 1, and vice versa.
+TEST(FixCodecs, TwoGatewaysDoNotDeliverEachOthersReports) {
+  Harness h;
+  h.addAbc();
+
+  // The same connection id (1) on two different gateways -- exactly the
+  // collision, since each gateway counts from 1.
+  constexpr std::uint64_t kConnection = 1;
+  const std::uint64_t onGw0 = fix::ExchangeFixInputCodec::wireSessionId(0, kConnection);
+  const std::uint64_t onGw1 = fix::ExchangeFixInputCodec::wireSessionId(1, kConnection);
+  EXPECT_NE(onGw0, onGw1) << "the wire ids must differ even though the connection ids match";
+
+  NewOrderSpec s;
+  s.session = onGw0;  // a client of gateway 0
+  s.clOrdId = "gw0-order";
+  s.price = px(10);
+  s.quantity = lots(5);
+  const Encoded input = newOrder(s);
+  h.apply(input);
+  const auto bytes = recordBytes(h.seq, input, h.collector);
+  const sequencer::journal::RecordView record(bytes.data(), static_cast<std::uint32_t>(bytes.size()));
+
+  fix::ExchangeFixOutputCodec gw0(0);
+  fix::ExchangeFixOutputCodec gw1(1);
+  Capture toGw0, toGw1;
+  gw0.toOutput(record, toGw0);
+  gw1.toOutput(record, toGw1);
+
+  ASSERT_EQ(toGw0.sent.size(), 1u) << "gateway 0 owns this session and must deliver";
+  EXPECT_EQ(toGw0.sent[0].first, kConnection)
+      << "and must hand the transport the CONNECTION id, not the composed one";
+  EXPECT_TRUE(toGw1.sent.empty()) << "gateway 1 must not deliver another gateway's client's report";
+
+  // And the mirror: a record from gateway 1's client.
+  Harness h2;
+  h2.addAbc();
+  NewOrderSpec s2 = s;
+  s2.session = onGw1;
+  s2.clOrdId = "gw1-order";
+  const Encoded input2 = newOrder(s2);
+  h2.apply(input2);
+  const auto bytes2 = recordBytes(h2.seq, input2, h2.collector);
+  const sequencer::journal::RecordView record2(bytes2.data(), static_cast<std::uint32_t>(bytes2.size()));
+  Capture back0, back1;
+  fix::ExchangeFixOutputCodec(0).toOutput(record2, back0);
+  fix::ExchangeFixOutputCodec(1).toOutput(record2, back1);
+  EXPECT_TRUE(back0.sent.empty());
+  ASSERT_EQ(back1.sent.size(), 1u);
+  EXPECT_EQ(back1.sent[0].first, kConnection);
+}
+
 TEST(FixOutputCodec, RejectsCancelsReplacesAndInstrumentsMap) {
   Harness h;
   h.addAbc();

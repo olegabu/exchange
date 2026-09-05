@@ -33,6 +33,13 @@ DEFINE_string(sequence_store_dir, "",
               "which loses a session's numbers across a restart");
 DEFINE_string(sender_comp_id, "EXCHANGE", "This gateway's own FIX CompID");
 DEFINE_int32(heartbeat_interval, 30, "FIX HeartBtInt, in seconds");
+DEFINE_uint32(gateway_id, 0,
+              "This gateway's own id, and it MUST be distinct across every gateway tailing the "
+              "same journal. A gateway numbers its client sessions from 1 inside its own process, "
+              "so two gateways both hand out session 1; this id is composed into the session id "
+              "that goes on the wire, and each gateway delivers only what its own id addresses. "
+              "Running two gateways with the same id makes each deliver the other's execution "
+              "reports to the wrong client.");
 
 int main(int argc, char** argv) {
   google::InitGoogleLogging(argv[0]);
@@ -54,7 +61,7 @@ int main(int argc, char** argv) {
   config.inlineDesignatedOutputs = false;
 
   LOG(INFO) << "exchange FIX session gateway starting: listen_port=" << FLAGS_listen_port
-            << " node_peers=" << FLAGS_node_peers;
+            << " node_peers=" << FLAGS_node_peers << " gateway_id=" << FLAGS_gateway_id;
 
   return sequencer::fix::RunFixSessionGateway(std::move(config),
                                               std::make_unique<exchange::fix::ExchangeFixInputCodec>(),

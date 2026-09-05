@@ -333,4 +333,14 @@ numbers live in `measurements.md`.
   been taken at 10k with an almost empty book, and did not hold at
   scale — a probe armed in the wrong regime is as misleading as no
   probe (`measurements.md` §3).
+- Session ids are namespaced by an operator-assigned `--gateway_id`
+  (`gatewayId << 32 | connectionId`), because sequencer numbers a
+  gateway's sessions from 1 inside each process while the journal is
+  shared: two gateways both handed out session 1 and each delivered the
+  other's execution reports to the wrong client. Both halves of the fix
+  are ours, so sequencer is unchanged. Distinct ids are mandatory when
+  more than one gateway tails a journal.
+- The ladder is now run with `MAX_INFLIGHT` raised: the harness's
+  default in-flight cap, not the exchange, produced every drop below
+  the ceiling. Zero drops through 150k once raised.
 

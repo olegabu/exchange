@@ -202,39 +202,99 @@ by matching less.
 
 ### The ladder after the fix
 
-Same fleet, same gateway, band widened to what a venue looks like:
+**Configuration: 5 client boxes, one session each, ONE gateway on the
+leader node, wide price band, `--max_inflight=50000`.**
+
+| offered | achieved | p50 | p99 | dropped |
+|---|---|---|---|---|
+| 10,000 | 9,995 | 716 µs | 884 µs | 0 |
+| 25,000 | 24,991 | 784 µs | 1,012 µs | 0 |
+| 50,000 | 47,488 | 874 µs | 102 ms | 0 |
+| 75,000 | 56,233 | 969 µs | 134 ms | 0 |
+| 100,000 | 75,020 | **1,076 µs** | 177 ms | 0 |
+| 150,000 | 112,478 | 9.4 ms | 301 ms | 0 |
+| 200,000 | 121,888 | 11 ms | 325 ms | 936,445 |
+| 250,000 | **123,408** | 753 ms | 1.27 s | 3.0M |
+| 300,000–500,000 | 105k → 67k | 1.8 s → 3.1 s | — | rising |
+
+**Zero drops through 150,000 offered**, p50 near 1 ms to 100k, ceiling
+~123,000/s.
+
+### Three corrections to what was reported earlier
+
+- **"The knee moved to 125k" was wrong.** Hollow markers mean *achieved
+  < 99% of offered*, and they start at 50k, not 125k. What moved was
+  the **ceiling** (peak achieved). sequencer's README separates last
+  clean rate, knee and ceiling; conflating them overstated the result.
+- **The drops before the ceiling were the client, not the exchange.**
+  The harness defaults `maxInflight` to `max(1000, rate/10)`; raising
+  it to 50,000 removed *every* drop up to 150k. At 100k the same
+  cluster went from 73,114 achieved with 75,951 drops to 75,020 with
+  **zero**. Any run showing drops well below the ceiling should be
+  repeated with `MAX_INFLIGHT` raised before the exchange is blamed.
+- **The p99 spread is real and unexplained.** From 50k up, p50 stays
+  near 1 ms while p99 is 100 ms+. That is bimodal, not a slow system,
+  and nothing measured so far accounts for it.
+
+### Controls
+
+**A flow that never matches** (`--flow=rest-cancel`: every order a buy,
+cancelled immediately, so nothing can cross), one gateway:
 
 | offered | achieved | p50 | dropped |
 |---|---|---|---|
-| 10,000 | 9,995 | 871 µs | 0 |
-| 25,000 | 24,994 | 921 µs | 0 |
-| 50,000 | 42,133 | 1,025 µs | 12,724 |
-| 75,000 | 55,339 | 1,136 µs | 35,701 |
-| 100,000 | 73,114 | **1,311 µs** | 75,951 |
-| 150,000 | 106,890 | 8.2 ms | 259,874 |
-| 200,000 | **124,899** | 86 ms | 1.2M |
-| 250,000–500,000 | 109k → 64k | 157 ms → 550 ms | rising |
+| 100,000 | **99,965** | 1,016 µs | 0 |
+| 200,000 | 142,421 | 221 ms | — |
 
-**p50 stays near 1 ms through 100,000 offered, and the peak achieved
-rate is ~125,000/s** — five times the first sweep's ~25k. `spec.md`
-§9.1's latency target (interface p50 + ≤100 µs) is met at 100k: 1,311 µs
-against the counter's 1,005 µs on the same fleet, so the matching
-engine is costing about 300 µs of round trip, not milliseconds.
+Clean at 100k, ceiling ~142k. So matching costs the *clean* rate
+(100k → ~50k) but barely moves the ceiling — the ceiling is shared and
+is not the matching engine.
 
-The remaining gap to `sequencer-fix`'s 400k is what an exchange
-actually buys: 288 B records against 16 B, 1.57 FIX messages out per
-input against 1, and a book to maintain.
+**Gateway count**, real flow, both gateways on the leader (a gateway
+must be colocated with a node to tail its journal, and putting one on a
+follower would add a cross-AZ hop to every propose):
+
+| gateways | 100k achieved | 200k achieved | 200k p50 |
+|---|---|---|---|
+| 1 | **99,965** | 125,461 | 389 ms |
+| 2 | 70,195 | 118,477 | **39 ms** |
+
+A second gateway **does not raise the ceiling** — more evidence the
+gateway is not the constraint — but it improves the tail markedly under
+overload (389 ms → 39 ms at 200k). It is worse at 100k, and the
+unanswered count roughly doubles, which is not yet explained.
+
+### A correctness bug found on the way: session ids collide across gateways
+
+Sequencer's `FixInputTransport::nextSessionId` is a counter starting at
+1 **inside each gateway process**, while the journal is shared by every
+gateway tailing it. This repository routed outputs with
+`fanout.toSession(sessionId)`, so with two gateways both handing out
+session 1, every output was delivered twice — once to the right client
+and once to a stranger.
+
+Fixed here rather than in sequencer, since both halves are ours: the
+input codec composes an operator-assigned `--gateway_id` into the wire
+session id (`gatewayId << 32 | connectionId`), and the output codec
+delivers only what its own id addresses, stripping the half back off
+before handing the id to the transport.
+`FixCodecs.TwoGatewaysDoNotDeliverEachOthersReports` asserts it and was
+shown to fail without the fix. It does **not** fix the reconnect gap
+(olegabu/sequencer#1): the low half is still a per-connection counter.
+
+Fixing it did not change the two-gateway throughput, so the collision
+was a correctness bug, not the cause of the shortfall.
 
 ### Still open
 
-- **Cancel/replace stays O(depth at a price).** Harmless with a wide
-  book, dominant with a narrow one, so an instrument whose liquidity
-  sits at one or two prices would hit it. The fix is an index from
-  order identity to book position, which is a change to the vendored
-  matcher: `liquibook-determinism.md` records it as v2 work.
-- Between 50k and 150k the rig drops rise while p50 stays near 1 ms,
-  which is the client's in-flight cap binding rather than the exchange
-  slowing; a run with a larger `--max_inflight` would separate them.
+- **What the ~123k ceiling is.** Not the gateway (a second one does not
+  raise it), not the state machine (1 µs with a wide book), not the
+  output codec (307k), not the input path (343k). It is shared, and the
+  next suspects are the journal write path and braft: this application
+  writes 288 B per record against the counter's 16 B, so at 123k it is
+  moving ~35 MB/s of journal against the counter's 6.4 MB/s at 400k.
+  Measuring disk and network throughput at the ceiling is the next step.
+- **The bimodal p99**, and why two gateways lose more replies than one.
 
 ## 4. Fleet p50 at 100k — superseded
 
